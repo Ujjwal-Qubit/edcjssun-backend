@@ -1,0 +1,308 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+//////////////////////////////////////////////////////
+// USER
+//////////////////////////////////////////////////////
+
+model User {
+  id          String   @id @default(cuid())
+  name        String
+  email       String   @unique
+  password    String
+  role        Role     @default(PARTICIPANT)
+  avatar      String?
+  phone       String?
+  institution String?
+  isVerified  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  teamMembers TeamMember[]
+  sessions    RefreshToken[]
+}
+
+enum Role {
+  PARTICIPANT
+  EVENT_ADMIN
+  SUPER_ADMIN
+}
+
+//////////////////////////////////////////////////////
+// EVENT
+//////////////////////////////////////////////////////
+
+model Event {
+  id                   String      @id @default(cuid())
+  slug                 String      @unique
+  title                String
+  tagline              String?
+  description          String
+  coverImage           String?
+  logo                 String?
+  venue                String
+  eventDate            DateTime
+  eventEndDate         DateTime?
+  registrationOpen     Boolean     @default(false)
+  registrationDeadline DateTime?
+  maxTeams             Int         @default(24)
+  teamSizeMin          Int         @default(2)
+  teamSizeMax          Int         @default(4)
+  eligibility          String?
+  entryFee             Int         @default(0)
+  prizePool            Int?
+  status               EventStatus @default(DRAFT)
+  isPublic             Boolean     @default(false)
+  auctionEnabled       Boolean     @default(false)
+  createdBy            String
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  rounds            Round[]
+  teams             Team[]
+  prizes            Prize[]
+  problems          Problem[]
+  settings          EventSettings?
+  submissions       Submission[]
+  pointTransactions PointTransaction[]
+  emailLogs         EmailLog[]
+  teamMembers       TeamMember[]
+}
+
+enum EventStatus {
+  DRAFT
+  UPCOMING
+  REGISTRATION_OPEN
+  REGISTRATION_CLOSED
+  ONGOING
+  COMPLETED
+  ARCHIVED
+}
+
+//////////////////////////////////////////////////////
+// ROUND
+//////////////////////////////////////////////////////
+
+model Round {
+  id          String    @id @default(cuid())
+  eventId     String
+  order       Int
+  name        String
+  description String?
+  startTime   DateTime?
+  endTime     DateTime?
+  roundType   RoundType
+  isActive    Boolean   @default(false)
+
+  event       Event        @relation(fields: [eventId], references: [id])
+  submissions Submission[]
+}
+
+enum RoundType {
+  SUBMISSION
+  BIDDING
+  PRESENTATION
+  QUIZ
+  CRISIS
+  GENERAL
+}
+
+//////////////////////////////////////////////////////
+// TEAM
+//////////////////////////////////////////////////////
+
+model Team {
+  id             String     @id @default(cuid())
+  registrationId String     @unique
+  eventId        String
+  teamName       String
+  teamSize       Int
+  status         TeamStatus @default(PENDING)
+  hearAboutUs    String?
+  pointBalance   Int        @default(1000)
+  problemWon     String?
+  checkInStatus  Boolean    @default(false)
+  submittedAt    DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  event        Event              @relation(fields: [eventId], references: [id])
+  members      TeamMember[]
+  submissions  Submission[]
+  transactions PointTransaction[]
+  problems     Problem[]
+
+  @@index([eventId])
+}
+
+enum TeamStatus {
+  PENDING
+  SHORTLISTED
+  WAITLISTED
+  REJECTED
+  CHECKED_IN
+}
+
+//////////////////////////////////////////////////////
+// TEAM MEMBER
+//////////////////////////////////////////////////////
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  eventId   String
+  userId    String?
+  name      String
+  rollNo    String
+  year      String
+  branch    String
+  email     String
+  phone     String
+  isLead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  team  Team  @relation(fields: [teamId], references: [id])
+  event Event @relation(fields: [eventId], references: [id])
+  user  User? @relation(fields: [userId], references: [id])
+
+  @@unique([rollNo, eventId])
+}
+
+//////////////////////////////////////////////////////
+// SUBMISSION
+//////////////////////////////////////////////////////
+
+model Submission {
+  id           String         @id @default(cuid())
+  teamId       String
+  eventId      String
+  roundId      String?
+  type         SubmissionType
+  fileUrl      String?
+  fileName     String?
+  fileSize     Int?
+  externalLink String?
+  submittedAt  DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  reviewNotes  String?
+  score        Float?
+
+  team  Team   @relation(fields: [teamId], references: [id])
+  event Event  @relation(fields: [eventId], references: [id])
+  round Round? @relation(fields: [roundId], references: [id])
+
+  @@unique([teamId, roundId])
+  @@index([teamId])
+  @@index([eventId])
+}
+
+enum SubmissionType {
+  PPT
+  PDF
+  DOCUMENT
+  LINK
+  IMAGE
+}
+
+//////////////////////////////////////////////////////
+// POINT TRANSACTION (Auction)
+//////////////////////////////////////////////////////
+
+model PointTransaction {
+  id        String   @id @default(cuid())
+  teamId    String
+  eventId   String
+  amount    Int
+  reason    String
+  adminNote String?
+  createdAt DateTime @default(now())
+  createdBy String
+
+  team  Team  @relation(fields: [teamId], references: [id])
+  event Event @relation(fields: [eventId], references: [id])
+}
+
+//////////////////////////////////////////////////////
+// PROBLEM (Auction)
+//////////////////////////////////////////////////////
+
+model Problem {
+  id             String  @id @default(cuid())
+  eventId        String
+  order          Int
+  title          String
+  description    String
+  category       String?
+  isActive       Boolean @default(true)
+  assignedTeamId String?
+
+  event        Event @relation(fields: [eventId], references: [id])
+  assignedTeam Team? @relation(fields: [assignedTeamId], references: [id])
+}
+
+//////////////////////////////////////////////////////
+// PRIZE
+//////////////////////////////////////////////////////
+
+model Prize {
+  id      String @id @default(cuid())
+  eventId String
+  rank    Int
+  label   String
+  amount  Int
+  perks   String
+
+  event Event @relation(fields: [eventId], references: [id])
+}
+
+//////////////////////////////////////////////////////
+// EVENT SETTINGS
+//////////////////////////////////////////////////////
+
+model EventSettings {
+  id                    String    @id
+  pptSubmissionOpen     Boolean   @default(false)
+  pptSubmissionDeadline DateTime?
+  leaderboardVisible    Boolean   @default(false)
+  biddingActive         Boolean   @default(false)
+  currentPhase          String    @default("pre-event")
+  allowWalkIns          Boolean   @default(false)
+  updatedAt             DateTime  @updatedAt
+  updatedBy             String?
+
+  event Event @relation(fields: [id], references: [id])
+}
+
+//////////////////////////////////////////////////////
+// EMAIL LOG
+//////////////////////////////////////////////////////
+
+model EmailLog {
+  id        String   @id @default(cuid())
+  eventId   String?
+  recipient String
+  type      String
+  subject   String
+  status    String
+  sentAt    DateTime @default(now())
+
+  event Event? @relation(fields: [eventId], references: [id])
+}
+
+//////////////////////////////////////////////////////
+// REFRESH TOKEN
+//////////////////////////////////////////////////////
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+}
