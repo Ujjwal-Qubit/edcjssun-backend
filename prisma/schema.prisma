@@ -155,9 +155,8 @@ enum TeamStatus {
 //////////////////////////////////////////////////////
 
 model TeamMember {
-  id        String   @id @default(cuid())
+  id        String @id @default(cuid())
   teamId    String
-  eventId   String
   userId    String?
   name      String
   rollNo    String
@@ -165,14 +164,9 @@ model TeamMember {
   branch    String
   email     String
   phone     String
-  isLead    Boolean  @default(false)
-  createdAt DateTime @default(now())
+  isLead    Boolean @default(false)
 
-  team  Team  @relation(fields: [teamId], references: [id])
-  event Event @relation(fields: [eventId], references: [id])
-  user  User? @relation(fields: [userId], references: [id])
-
-  @@unique([rollNo, eventId])
+  team Team @relation(fields: [teamId], references: [id])
 }
 
 //////////////////////////////////////////////////////

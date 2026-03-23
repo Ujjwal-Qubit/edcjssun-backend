@@ -3,7 +3,9 @@ import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
+
 import authRoutes from "./routes/auth.routes.js";
+import eventsRoutes from "./routes/events.routes.js";
 
 dotenv.config();
 
@@ -23,6 +25,9 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api/auth", authRoutes);
+
+app.use("/api/events", eventsRoutes);
+
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ message: "Server error" });
