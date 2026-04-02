@@ -1,4 +1,5 @@
 import prisma from '../utils/prisma.js'
+import { sendError, sendSuccess } from '../utils/response.js'
 
 export const getAllEvents = async (req, res) => {
   try {
@@ -9,9 +10,10 @@ export const getAllEvents = async (req, res) => {
       }
     })
 
-    res.json(events)
+    return sendSuccess(res, events)
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch events' })
+    console.error('getAllEvents error:', err)
+    return sendError(res, 500, 'EVENTS_FETCH_FAILED', 'Failed to fetch events')
   }
 }
 
@@ -29,12 +31,13 @@ export const getEventBySlug = async (req, res) => {
     })
 
     if (!event) {
-      return res.status(404).json({ error: 'Event not found' })
+      return sendError(res, 404, 'EVENT_NOT_FOUND', 'Event not found')
     }
 
-    res.json(event)
+    return sendSuccess(res, event)
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch event' })
+    console.error('getEventBySlug error:', err)
+    return sendError(res, 500, 'EVENT_FETCH_FAILED', 'Failed to fetch event')
   }
 }
 
@@ -42,12 +45,10 @@ export const getEventRounds = async (req, res) => {
   try {
     const { slug } = req.params
 
-    const event = await prisma.event.findUnique({
-      where: { slug }
-    })
+    const event = await prisma.event.findUnique({ where: { slug } })
 
     if (!event) {
-      return res.status(404).json({ error: 'Event not found' })
+      return sendError(res, 404, 'EVENT_NOT_FOUND', 'Event not found')
     }
 
     const rounds = await prisma.round.findMany({
@@ -55,9 +56,10 @@ export const getEventRounds = async (req, res) => {
       orderBy: { order: 'asc' }
     })
 
-    res.json(rounds)
+    return sendSuccess(res, rounds)
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch rounds' })
+    console.error('getEventRounds error:', err)
+    return sendError(res, 500, 'ROUNDS_FETCH_FAILED', 'Failed to fetch rounds')
   }
 }
 
@@ -66,23 +68,35 @@ export const checkRollNo = async (req, res) => {
     const { slug } = req.params
     const { rollNo } = req.query
 
-    const event = await prisma.event.findUnique({
-      where: { slug }
-    })
-
-    if (!event) {
-      return res.status(404).json({ error: 'Event not found' })
+    if (!rollNo || typeof rollNo !== 'string' || rollNo.trim().length === 0) {
+      return sendError(res, 400, 'ROLLNO_REQUIRED', 'Roll number is required')
     }
 
-    const exists = await prisma.teamMember.findFirst({
+    const event = await prisma.event.findUnique({ where: { slug } })
+
+    if (!event) {
+      return sendError(res, 404, 'EVENT_NOT_FOUND', 'Event not found')
+    }
+
+    const normalizedRollNo = rollNo.trim()
+
+    const teamMemberExists = await prisma.teamMember.findFirst({
       where: {
-        rollNo,
+        rollNo: normalizedRollNo,
         team: { eventId: event.id }
       }
     })
 
-    res.json({ taken: !!exists })
+    const soloExists = await prisma.registration.findFirst({
+      where: {
+        eventId: event.id,
+        user: { rollNo: normalizedRollNo }
+      }
+    })
+
+    return sendSuccess(res, { taken: !!teamMemberExists || !!soloExists, eventSlug: slug })
   } catch (err) {
-    res.status(500).json({ error: 'Failed to check roll number' })
+    console.error('checkRollNo error:', err)
+    return sendError(res, 500, 'ROLLNO_CHECK_FAILED', 'Failed to check roll number')
   }
 }
