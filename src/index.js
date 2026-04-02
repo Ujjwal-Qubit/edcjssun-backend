@@ -14,6 +14,7 @@ import auctionRoutes from "./routes/auction.routes.js"
 import { errorHandler } from "./middleware/auth.middleware.js"
 import { sendSuccess } from "./utils/response.js"
 import { validateEnvironment } from "./config/env.js"
+import prisma from "./utils/prisma.js"
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -21,21 +22,18 @@ const PORT = process.env.PORT || 3001
 validateEnvironment()
 
 // ─── CORS ───────────────────────────────────────────────────────
-const ALLOWED_ORIGINS = [
-  "http://localhost:5173",
-  "http://localhost:5174",
-  "http://localhost:3000",
-  "https://edcjssun.com",
-  "https://www.edcjssun.com",
-  "https://admin.edcjssun.com",
-  "https://judge.edcjssun.com",
-  "https://auction.edcjssun.com"
-]
+const envOrigins = (process.env.FRONTEND_URL || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean)
+
+const devOrigins = ["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"]
+const allowedOrigins = new Set(process.env.NODE_ENV === "production" ? envOrigins : [...envOrigins, ...devOrigins])
 
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, curl, etc)
-    if (!origin || ALLOWED_ORIGINS.includes(origin) || origin.endsWith(".edcjssun.com")) {
+    if (!origin || allowedOrigins.has(origin)) {
       callback(null, true)
     } else {
       callback(new Error("Not allowed by CORS"))
@@ -82,12 +80,21 @@ app.get("/", (req, res) => {
   })
 })
 
-app.get("/health", (req, res) => {
-  return sendSuccess(res, {
-    status: "ok",
-    service: "edcjssun-backend",
-    timestamp: new Date().toISOString()
-  })
+app.get("/health", async (req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`
+    return sendSuccess(res, {
+      status: "ok",
+      service: "edcjssun-backend",
+      database: "ok",
+      timestamp: new Date().toISOString()
+    })
+  } catch (_err) {
+    return res.status(503).json({
+      success: false,
+      error: { code: "DB_UNAVAILABLE", message: "Database health check failed" }
+    })
+  }
 })
 
 // ─── Routes ─────────────────────────────────────────────────────
@@ -119,9 +126,24 @@ process.on("uncaughtException", (err) => {
   process.exit(1)
 })
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`)
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`)
 })
+
+const shutdown = (signal) => {
+  console.log(`${signal} received. Shutting down gracefully...`)
+  server.close(async () => {
+    try {
+      await prisma.$disconnect()
+    } catch (_err) {
+      // Ignore disconnect errors during shutdown
+    }
+    process.exit(0)
+  })
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"))
+process.on("SIGINT", () => shutdown("SIGINT"))
 
 export default app
