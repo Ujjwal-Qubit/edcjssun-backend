@@ -69,21 +69,6 @@ export const getEventBySlug = async (req, res) => {
       } else {
         throw dbErr
       }
-      })
-    } catch (queryErr) {
-      // Backward-compatible fallback for deployments where EventSettings columns
-      // are not fully migrated yet (Prisma P2022).
-      if (queryErr?.code === 'P2022' && String(queryErr?.meta?.column || '').startsWith('EventSettings.')) {
-        event = await prisma.event.findUnique({
-          where: { slug },
-          include: {
-            rounds: { orderBy: { order: 'asc' } },
-            prizes: true
-          }
-        })
-      } else {
-        throw queryErr
-      }
     }
 
     if (!event) {
