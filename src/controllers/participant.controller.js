@@ -5,7 +5,7 @@ import { upload, uploadSubmissionFile, validateFileType, validateFileSize } from
 import { sendTemplatedEmail, buildEmailVariables } from "../services/email.service.js"
 import { generateQrToken } from "../services/qr.service.js"
 
-const STORAGE_HARD_CAP_MB = Number(process.env.CLOUDINARY_MAX_FILE_SIZE_MB || 20)
+const STORAGE_HARD_CAP_MB = 20
 
 const sanitizeNameSegment = (value, fallback = "NA") => {
   const cleaned = String(value || "")
@@ -90,6 +90,7 @@ export const getMyRegistration = async (req, res) => {
           roundId: s.roundId,
           roundName: s.round?.name || null,
           type: s.type,
+          storageKey: s.storageKey,
           fileUrl: s.fileUrl,
           fileName: s.fileName,
           fileSize: s.fileSize,
@@ -157,6 +158,7 @@ export const getMyRegistration = async (req, res) => {
           roundId: s.roundId,
           roundName: s.round?.name || null,
           type: s.type,
+          storageKey: s.storageKey,
           fileUrl: s.fileUrl,
           fileName: s.fileName,
           fileSize: s.fileSize,
@@ -339,77 +341,62 @@ export const submitDeliverable = async (req, res) => {
       return sendError(res, 403, "NOT_ELIGIBLE", "Not eligible to submit")
     }
 
-    // Handle submission based on type
-    const submissionType = round.submissionType || "MIXED"
-    let fileUrl = null, fileName = null, fileSize = null, externalLink = null, formData = null
+    // Handle submission as FILE or LINK only
+    let fileUrl = null, fileName = null, fileSize = null, externalLink = null, storageKey = null
     const trackId = req.body.trackId || null
+    const externalLinkInput = typeof req.body.externalLink === "string"
+      ? req.body.externalLink.trim()
+      : ""
 
-    if (submissionType === "FILE" || submissionType === "MIXED") {
-      if (req.file) {
-        const configuredRoundLimitMb = Number(round.maxFileSize || 20)
-        const effectiveMaxFileSizeMb = Math.min(configuredRoundLimitMb, STORAGE_HARD_CAP_MB)
+    if (req.file) {
+      const configuredRoundLimitMb = Number(round.maxFileSize || STORAGE_HARD_CAP_MB)
+      const effectiveMaxFileSizeMb = Math.min(configuredRoundLimitMb, STORAGE_HARD_CAP_MB)
 
-        // Validate file type
-        if (!validateFileType(req.file.originalname, round.acceptedFileTypes)) {
-          return sendError(res, 422, "INVALID_FILE_TYPE", `Accepted types: ${round.acceptedFileTypes || "common document types"}`)
-        }
-        // Validate file size
-        if (!validateFileSize(req.file.size, effectiveMaxFileSizeMb)) {
-          return sendError(res, 422, "FILE_TOO_LARGE", `Max file size: ${effectiveMaxFileSizeMb}MB`)
-        }
-        // Upload to cloudinary
-        try {
-          const canonicalFileName = buildSubmissionFileName({
-            teamName: submitterTeamName,
-            registrationId: submitterRegId,
-            institution: submitterInstitution,
-            originalname: req.file.originalname,
-            mimeType: req.file.mimetype,
-          })
-
-          const uploaded = await uploadSubmissionFile(req.file, {
-            eventSlug: event.slug,
-            roundOrder: round.order,
-            registrationId: submitterRegId,
-            fileName: canonicalFileName,
-          })
-          fileUrl = uploaded.fileUrl
-          fileName = uploaded.fileName
-          fileSize = uploaded.fileSize
-        } catch (uploadErr) {
-          console.error("Upload failed:", uploadErr)
-          if (String(uploadErr?.message || "").toLowerCase().includes("file size too large")) {
-            return sendError(res, 422, "FILE_TOO_LARGE", `Max file size: ${STORAGE_HARD_CAP_MB}MB`)
-          }
-          return sendError(res, 500, "UPLOAD_FAILED", "File upload failed")
-        }
-      } else if (submissionType === "FILE") {
-        return sendError(res, 422, "FILE_REQUIRED", "File is required for this submission type")
+      if (!validateFileType(req.file.originalname, round.acceptedFileTypes)) {
+        return sendError(res, 422, "INVALID_FILE_TYPE", "Only PDF, PPT, and PPTX files are allowed")
       }
-    }
 
-    if (submissionType === "LINK" || submissionType === "MIXED") {
-      if (req.body.externalLink) {
-        externalLink = req.body.externalLink
-      } else if (submissionType === "LINK") {
-        return sendError(res, 422, "LINK_REQUIRED", "External link is required")
+      if (!validateFileSize(req.file.size, effectiveMaxFileSizeMb)) {
+        return sendError(res, 422, "FILE_TOO_LARGE", `Max file size: ${effectiveMaxFileSizeMb}MB`)
       }
-    }
 
-    if (submissionType === "FORM" || submissionType === "MIXED") {
-      if (req.body.formData) {
-        formData = typeof req.body.formData === "string"
-          ? JSON.parse(req.body.formData)
-          : req.body.formData
-      } else if (submissionType === "FORM") {
-        return sendError(res, 422, "FORM_DATA_REQUIRED", "Form data is required")
+      try {
+        const canonicalFileName = buildSubmissionFileName({
+          teamName: submitterTeamName,
+          registrationId: submitterRegId,
+          institution: submitterInstitution,
+          originalname: req.file.originalname,
+          mimeType: req.file.mimetype,
+        })
+
+        const uploaded = await uploadSubmissionFile(req.file, {
+          eventSlug: event.slug,
+          registrationId: submitterRegId,
+          fileName: canonicalFileName,
+        })
+        storageKey = uploaded.storageKey
+        fileUrl = uploaded.fileUrl
+        fileName = uploaded.fileName
+        fileSize = uploaded.fileSize
+      } catch (uploadErr) {
+        console.error("Upload failed:", uploadErr)
+        return sendError(res, 500, "UPLOAD_FAILED", "File upload failed")
       }
+    } else if (externalLinkInput) {
+      try {
+        const parsed = new URL(externalLinkInput)
+        if (!["http:", "https:"].includes(parsed.protocol)) {
+          return sendError(res, 422, "INVALID_EXTERNAL_LINK", "Only http/https links are allowed")
+        }
+        externalLink = externalLinkInput
+      } catch {
+        return sendError(res, 422, "INVALID_EXTERNAL_LINK", "External link must be a valid URL")
+      }
+    } else {
+      return sendError(res, 422, "CONTENT_REQUIRED", "Provide a file or an external link")
     }
 
-    // For MIXED, at least one content type required
-    if (submissionType === "MIXED" && !fileUrl && !externalLink && !formData) {
-      return sendError(res, 422, "CONTENT_REQUIRED", "At least one of file, link, or form data is required")
-    }
+    const submissionType = req.file ? "FILE" : "LINK"
 
     // Upsert submission — unique on teamId/registrationId + roundId
     const where = teamId
@@ -421,11 +408,11 @@ export const submitDeliverable = async (req, res) => {
       roundId,
       trackId,
       type: submissionType,
+      storageKey,
       fileUrl,
       fileName,
       fileSize,
       externalLink,
-      formData,
       submittedAt: new Date()
     }
 
@@ -467,6 +454,7 @@ export const submitDeliverable = async (req, res) => {
     return sendSuccess(res, {
       id: submission.id,
       type: submission.type,
+      storageKey: submission.storageKey,
       fileUrl: submission.fileUrl,
       fileName: submission.fileName,
       fileSize: submission.fileSize,
@@ -529,6 +517,7 @@ export const getMySubmissions = async (req, res) => {
         roundId: s.roundId,
         roundName: s.round?.name || null,
         type: s.type,
+        storageKey: s.storageKey,
         fileUrl: s.fileUrl,
         fileName: s.fileName,
         fileSize: s.fileSize,

@@ -46,6 +46,7 @@ export const getSubmissions = async (req, res) => {
       roundName: s.round?.name || null,
       trackName: s.trackRef?.name || null,
       type: s.type,
+      storageKey: s.storageKey,
       fileUrl: s.fileUrl,
       fileName: s.fileName,
       fileSize: s.fileSize,

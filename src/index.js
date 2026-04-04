@@ -8,6 +8,7 @@ import rateLimit from "express-rate-limit"
 import authRoutes from "./routes/auth.routes.js"
 import eventsRoutes from "./routes/events.routes.js"
 import participantRoutes from "./routes/participant.routes.js"
+import submissionRoutes from "./routes/submission.routes.js"
 import adminRoutes from "./routes/admin.routes.js"
 import judgingRoutes from "./routes/judging.routes.js"
 import auctionRoutes from "./routes/auction.routes.js"
@@ -51,7 +52,12 @@ const devOrigins = ["http://localhost:5173", "http://localhost:5174", "http://lo
   .map(normalizeOrigin)
   .filter(Boolean)
 
-const allowedOrigins = new Set(process.env.NODE_ENV === "production" ? envOrigins : [...envOrigins, ...devOrigins])
+const defaultProdOrigins = ["https://edcjssun-events-frontend.vercel.app"]
+  .map(normalizeOrigin)
+  .filter(Boolean)
+
+const prodOrigins = envOrigins.length > 0 ? envOrigins : defaultProdOrigins
+const allowedOrigins = new Set(process.env.NODE_ENV === "production" ? prodOrigins : [...prodOrigins, ...devOrigins])
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -128,6 +134,7 @@ app.get("/health", async (req, res) => {
 app.use("/api/auth", authRoutes)
 app.use("/api/events", eventsRoutes)
 app.use("/api/participant", participantRoutes)
+app.use("/api/submissions", submissionRoutes)
 app.use("/api/admin", adminRoutes)
 app.use("/api/judging", judgingRoutes)
 if (ENABLE_AUCTION) {

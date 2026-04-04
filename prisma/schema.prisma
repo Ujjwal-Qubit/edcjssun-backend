@@ -300,6 +300,7 @@ model Submission {
 
   // Content
   type            SubmissionType
+  storageKey      String?
   fileUrl         String?
   fileName        String?
   fileSize        Int?

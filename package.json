@@ -4,10 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "npm run db:push && node index.js",
-    "db:push": "prisma db push",
+    "start": "node index.js",
     "postinstall": "prisma generate",
-    "start:src": "npm run db:push && node src/index.js",
+    "start:src": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -16,10 +15,11 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.883.0",
+    "@aws-sdk/s3-request-presigner": "^3.883.0",
     "@prisma/client": "^6.19.2",
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
-    "cloudinary": "^2.9.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "express": "^5.2.1",
