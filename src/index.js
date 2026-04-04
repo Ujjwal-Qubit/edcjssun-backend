@@ -23,18 +23,42 @@ const ENABLE_AUCTION = process.env.ENABLE_AUCTION === "true"
 validateEnvironment()
 
 // ─── CORS ───────────────────────────────────────────────────────
-const envOrigins = (process.env.FRONTEND_URL || "")
-  .split(",")
-  .map((origin) => origin.trim())
+const normalizeOrigin = (origin) => {
+  if (!origin || typeof origin !== "string") return null
+
+  const trimmed = origin.trim().replace(/\/+$/, "")
+  if (!trimmed) return null
+
+  // Accept env values like "edcjssun-events-frontend.vercel.app"
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+
+  try {
+    return new URL(withProtocol).origin
+  } catch {
+    return null
+  }
+}
+
+const envOrigins = [
+  ...(process.env.FRONTEND_URL || "").split(","),
+  process.env.VERCEL_URL,
+  process.env.RENDER_EXTERNAL_URL
+]
+  .map(normalizeOrigin)
   .filter(Boolean)
 
 const devOrigins = ["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"]
+  .map(normalizeOrigin)
+  .filter(Boolean)
+
 const allowedOrigins = new Set(process.env.NODE_ENV === "production" ? envOrigins : [...envOrigins, ...devOrigins])
 
 app.use(cors({
   origin: (origin, callback) => {
+    const normalizedOrigin = normalizeOrigin(origin)
+
     // Allow requests with no origin (mobile apps, curl, etc)
-    if (!origin || allowedOrigins.has(origin)) {
+    if (!origin || (normalizedOrigin && allowedOrigins.has(normalizedOrigin))) {
       callback(null, true)
     } else {
       callback(new Error("Not allowed by CORS"))
@@ -44,6 +68,8 @@ app.use(cors({
   methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Auction-Password"]
 }))
+
+console.log("CORS allowed origins:", [...allowedOrigins])
 
 // ─── Middleware ──────────────────────────────────────────────────
 app.use(express.json({ limit: "20mb" }))
