@@ -17,22 +17,31 @@ export const getAllEvents = async (req, res) => {
       }
     })
 
-    const withParticipants = await Promise.all(
-      events.map(async (event) => {
-        const teamMembersCount = await prisma.teamMember.count({
-          where: {
-            team: {
-              eventId: event.id
-            }
-          }
-        })
-
-        return {
-          ...event,
-          participants: (event?._count?.registrations || 0) + teamMembersCount
-        }
+    const eventIds = events.map((event) => event.id)
+    const teams = eventIds.length > 0
+      ? await prisma.team.findMany({
+        where: { eventId: { in: eventIds } },
+        select: {
+          eventId: true,
+          _count: {
+            select: {
+              members: true,
+            },
+          },
+        },
       })
-    )
+      : []
+
+    const teamMemberCountByEvent = teams.reduce((acc, team) => {
+      const eventId = team.eventId
+      acc.set(eventId, (acc.get(eventId) || 0) + (team?._count?.members || 0))
+      return acc
+    }, new Map())
+
+    const withParticipants = events.map((event) => ({
+      ...event,
+      participants: (event?._count?.registrations || 0) + (teamMemberCountByEvent.get(event.id) || 0),
+    }))
 
     return sendSuccess(res, withParticipants)
   } catch (err) {

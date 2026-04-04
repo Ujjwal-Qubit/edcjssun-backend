@@ -57,20 +57,17 @@ async function sendBatchEmails(emails) {
   let sent = 0
   let failed = 0
 
-  // Resend batch supports up to 100 per call
-  const batches = []
-  for (let i = 0; i < emails.length; i += 100) {
-    batches.push(emails.slice(i, i + 100))
-  }
+  const configuredConcurrency = Number(process.env.EMAIL_BATCH_CONCURRENCY || 8)
+  const concurrency = Number.isFinite(configuredConcurrency)
+    ? Math.max(1, Math.min(20, configuredConcurrency))
+    : 8
 
-  for (const batch of batches) {
-    for (const email of batch) {
-      try {
-        await sendEmail(email)
-        sent++
-      } catch {
-        failed++
-      }
+  for (let i = 0; i < emails.length; i += concurrency) {
+    const chunk = emails.slice(i, i + concurrency)
+    const settled = await Promise.allSettled(chunk.map((email) => sendEmail(email)))
+    for (const result of settled) {
+      if (result.status === "fulfilled") sent++
+      else failed++
     }
   }
 

@@ -78,20 +78,20 @@ export const scanQr = async (req, res) => {
     const event = await prisma.event.findUnique({ where: { slug } })
     if (!event) return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
 
-    // Find by QR token — check Registration first, then Team
-    let record = await prisma.registration.findFirst({
-      where: { qrCode: qrToken, eventId: event.id },
-      include: { user: { select: { name: true } } }
-    })
-    let recordType = "solo"
-
-    if (!record) {
-      record = await prisma.team.findFirst({
+    // Find by QR token with parallel lookups (preserve solo precedence)
+    const [soloRecord, teamRecord] = await Promise.all([
+      prisma.registration.findFirst({
+        where: { qrCode: qrToken, eventId: event.id },
+        include: { user: { select: { name: true } } }
+      }),
+      prisma.team.findFirst({
         where: { qrCode: qrToken, eventId: event.id },
         include: { members: { where: { isLead: true }, select: { name: true } } }
       })
-      recordType = "team"
-    }
+    ])
+
+    let record = soloRecord || teamRecord
+    let recordType = soloRecord ? "solo" : "team"
 
     if (!record) {
       return sendError(res, 404, "INVALID_QR", "QR code not recognized")

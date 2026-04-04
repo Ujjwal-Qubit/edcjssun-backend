@@ -11,6 +11,7 @@ export const getRegistrations = async (req, res) => {
   try {
     const { slug } = req.params
     const { status, year, branch, track, type, search, page = "1", limit = "20" } = req.query
+    const normalizedSearch = String(search || "").trim()
 
     const event = await prisma.event.findUnique({ where: { slug } })
     if (!event) return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
@@ -23,10 +24,42 @@ export const getRegistrations = async (req, res) => {
     if (!type || type === "solo") {
       const soloWhere = { eventId: event.id }
       if (status) soloWhere.status = status
+      if (track) soloWhere.trackId = track
+
+      const soloUserFilters = []
+      if (year) soloUserFilters.push({ year })
+      if (branch) soloUserFilters.push({ branch })
+      if (normalizedSearch) {
+        soloUserFilters.push({
+          OR: [
+            { name: { contains: normalizedSearch, mode: "insensitive" } },
+            { email: { contains: normalizedSearch, mode: "insensitive" } },
+            { rollNo: { contains: normalizedSearch, mode: "insensitive" } },
+          ],
+        })
+        soloWhere.OR = [
+          { registrationId: { contains: normalizedSearch, mode: "insensitive" } },
+          { user: { is: { OR: [
+            { name: { contains: normalizedSearch, mode: "insensitive" } },
+            { email: { contains: normalizedSearch, mode: "insensitive" } },
+            { rollNo: { contains: normalizedSearch, mode: "insensitive" } },
+          ] } } },
+        ]
+      }
+
+      if (soloUserFilters.length > 0) {
+        soloWhere.user = { is: { AND: soloUserFilters } }
+      }
 
       const soloRegs = await prisma.registration.findMany({
         where: soloWhere,
-        include: {
+        select: {
+          id: true,
+          registrationId: true,
+          status: true,
+          checkInStatus: true,
+          trackId: true,
+          submittedAt: true,
           user: { select: { name: true, email: true, year: true, branch: true, rollNo: true } },
           track: { select: { name: true } },
           submissions: {
@@ -34,45 +67,31 @@ export const getRegistrations = async (req, res) => {
             orderBy: { submittedAt: "desc" },
             take: 1,
           }
-        }
+        },
+        orderBy: { submittedAt: "desc" },
       })
 
-      soloItems = soloRegs
-        .filter(r => {
-          if (year && r.user.year !== year) return false
-          if (branch && r.user.branch !== branch) return false
-          if (track && r.trackId !== track) return false
-          if (search) {
-            const q = search.toLowerCase()
-            const match = (r.user.name || "").toLowerCase().includes(q) ||
-              (r.user.email || "").toLowerCase().includes(q) ||
-              (r.user.rollNo || "").toLowerCase().includes(q) ||
-              (r.registrationId || "").toLowerCase().includes(q)
-            if (!match) return false
-          }
-          return true
-        })
-        .map(r => {
-          const latestSubmission = r.submissions[0] || null
-          return {
-            id: r.id,
-            type: "solo",
-            registrationId: r.registrationId,
-            name: r.user.name,
-            size: 1,
-            leadName: r.user.name,
-            leadEmail: r.user.email,
-            year: r.user.year,
-            branch: r.user.branch,
-            trackName: r.track?.name || null,
-            status: r.status,
-            checkInStatus: r.checkInStatus,
-            hasSubmission: Boolean(latestSubmission),
-            submissionFileUrl: latestSubmission?.fileUrl || null,
-            submissionFileName: latestSubmission?.fileName || null,
-            submittedAt: latestSubmission?.submittedAt || r.submittedAt
-          }
-        })
+      soloItems = soloRegs.map(r => {
+        const latestSubmission = r.submissions[0] || null
+        return {
+          id: r.id,
+          type: "solo",
+          registrationId: r.registrationId,
+          name: r.user.name,
+          size: 1,
+          leadName: r.user.name,
+          leadEmail: r.user.email,
+          year: r.user.year,
+          branch: r.user.branch,
+          trackName: r.track?.name || null,
+          status: r.status,
+          checkInStatus: r.checkInStatus,
+          hasSubmission: Boolean(latestSubmission),
+          submissionFileUrl: latestSubmission?.fileUrl || null,
+          submissionFileName: latestSubmission?.fileName || null,
+          submittedAt: latestSubmission?.submittedAt || r.submittedAt
+        }
+      })
     }
 
     // Fetch team registrations
@@ -80,10 +99,42 @@ export const getRegistrations = async (req, res) => {
     if (!type || type === "team") {
       const teamWhere = { eventId: event.id }
       if (status) teamWhere.status = status
+      if (track) teamWhere.trackId = track
+
+      const teamAndClauses = []
+      if (year) {
+        teamAndClauses.push({ members: { some: { isLead: true, year } } })
+      }
+      if (branch) {
+        teamAndClauses.push({ members: { some: { isLead: true, branch } } })
+      }
+      if (normalizedSearch) {
+        teamAndClauses.push({
+          OR: [
+            { teamName: { contains: normalizedSearch, mode: "insensitive" } },
+            { registrationId: { contains: normalizedSearch, mode: "insensitive" } },
+            { members: { some: { isLead: true, email: { contains: normalizedSearch, mode: "insensitive" } } } },
+            { members: { some: { isLead: true, rollNo: { contains: normalizedSearch, mode: "insensitive" } } } },
+            { members: { some: { name: { contains: normalizedSearch, mode: "insensitive" } } } },
+          ],
+        })
+      }
+
+      if (teamAndClauses.length > 0) {
+        teamWhere.AND = teamAndClauses
+      }
 
       const teams = await prisma.team.findMany({
         where: teamWhere,
-        include: {
+        select: {
+          id: true,
+          registrationId: true,
+          teamName: true,
+          teamSize: true,
+          status: true,
+          checkInStatus: true,
+          trackId: true,
+          submittedAt: true,
           members: { select: { name: true, email: true, year: true, branch: true, rollNo: true, isLead: true } },
           track: { select: { name: true } },
           submissions: {
@@ -91,48 +142,32 @@ export const getRegistrations = async (req, res) => {
             orderBy: { submittedAt: "desc" },
             take: 1,
           }
-        }
+        },
+        orderBy: { submittedAt: "desc" },
       })
 
-      teamItems = teams
-        .filter(t => {
-          const lead = t.members.find(m => m.isLead)
-          if (year && lead?.year !== year) return false
-          if (branch && lead?.branch !== branch) return false
-          if (track && t.trackId !== track) return false
-          if (search) {
-            const q = search.toLowerCase()
-            const match = (t.teamName || "").toLowerCase().includes(q) ||
-              (lead?.email || "").toLowerCase().includes(q) ||
-              (lead?.rollNo || "").toLowerCase().includes(q) ||
-              (t.registrationId || "").toLowerCase().includes(q) ||
-              t.members.some(m => (m.name || "").toLowerCase().includes(q))
-            if (!match) return false
-          }
-          return true
-        })
-        .map(t => {
-          const lead = t.members.find(m => m.isLead)
-          const latestSubmission = t.submissions[0] || null
-          return {
-            id: t.id,
-            type: "team",
-            registrationId: t.registrationId,
-            name: t.teamName,
-            size: t.teamSize,
-            leadName: lead?.name || "",
-            leadEmail: lead?.email || "",
-            year: lead?.year || "",
-            branch: lead?.branch || "",
-            trackName: t.track?.name || null,
-            status: t.status,
-            checkInStatus: t.checkInStatus,
-            hasSubmission: Boolean(latestSubmission),
-            submissionFileUrl: latestSubmission?.fileUrl || null,
-            submissionFileName: latestSubmission?.fileName || null,
-            submittedAt: latestSubmission?.submittedAt || t.submittedAt
-          }
-        })
+      teamItems = teams.map(t => {
+        const lead = t.members.find(m => m.isLead)
+        const latestSubmission = t.submissions[0] || null
+        return {
+          id: t.id,
+          type: "team",
+          registrationId: t.registrationId,
+          name: t.teamName,
+          size: t.teamSize,
+          leadName: lead?.name || "",
+          leadEmail: lead?.email || "",
+          year: lead?.year || "",
+          branch: lead?.branch || "",
+          trackName: t.track?.name || null,
+          status: t.status,
+          checkInStatus: t.checkInStatus,
+          hasSubmission: Boolean(latestSubmission),
+          submissionFileUrl: latestSubmission?.fileUrl || null,
+          submissionFileName: latestSubmission?.fileName || null,
+          submittedAt: latestSubmission?.submittedAt || t.submittedAt
+        }
+      })
     }
 
     // Merge and paginate

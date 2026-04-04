@@ -2,6 +2,7 @@ import "./config/loadEnv.js"
 import express from "express"
 import cookieParser from "cookie-parser"
 import cors from "cors"
+import compression from "compression"
 import morgan from "morgan"
 import rateLimit from "express-rate-limit"
 
@@ -20,6 +21,7 @@ import prisma from "./utils/prisma.js"
 const app = express()
 const PORT = process.env.PORT || 3001
 const ENABLE_AUCTION = process.env.ENABLE_AUCTION === "true"
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000)
 
 validateEnvironment()
 
@@ -76,6 +78,23 @@ app.use(cors({
 }))
 
 console.log("CORS allowed origins:", [...allowedOrigins])
+
+app.use(compression())
+
+app.use((req, res, next) => {
+  res.setTimeout(REQUEST_TIMEOUT_MS, () => {
+    if (!res.headersSent) {
+      res.status(504).json({
+        success: false,
+        error: {
+          code: "REQUEST_TIMEOUT",
+          message: "Request timed out",
+        },
+      })
+    }
+  })
+  next()
+})
 
 // ─── Middleware ──────────────────────────────────────────────────
 app.use(express.json({ limit: "20mb" }))
@@ -168,6 +187,10 @@ const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`)
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`)
 })
+
+server.requestTimeout = REQUEST_TIMEOUT_MS
+server.headersTimeout = REQUEST_TIMEOUT_MS + 5000
+server.keepAliveTimeout = 5000
 
 const shutdown = (signal) => {
   console.log(`${signal} received. Shutting down gracefully...`)
