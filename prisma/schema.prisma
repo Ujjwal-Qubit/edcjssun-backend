@@ -270,8 +270,10 @@ model TeamMember {
   rollNo    String?
   year      String?
   branch    String?
+  institution String?
   email     String
   phone     String?
+  whatsapp  String?
   isLead    Boolean  @default(false)
 
   team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -393,6 +395,7 @@ model EventSettings {
 
   // Deadlines
   registrationDeadline      DateTime?
+  resultAnnouncementDate    DateTime?
   checkInOpenTime           DateTime?
 
   // Communications

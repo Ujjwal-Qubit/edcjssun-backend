@@ -51,11 +51,55 @@ export const sendBulkEmail = async (req, res) => {
     const { slug } = req.params
     const { to, trackId, subject, body, templateId } = req.body
 
-    const event = await prisma.event.findUnique({ where: { slug } })
+    const allowedFields = ["to", "templateId", "subject", "body", "trackId"]
+    const unknownFields = Object.keys(req.body || {}).filter((key) => !allowedFields.includes(key))
+    if (unknownFields.length > 0) {
+      return sendError(res, 422, "VALIDATION_ERROR", `Unsupported fields: ${unknownFields.join(", ")}`)
+    }
+
+    const normalizedTo = normalizeRecipientFilter(to)
+    if (!normalizedTo) {
+      return sendError(res, 422, "VALIDATION_ERROR", "Invalid 'to' filter")
+    }
+
+    const normalizedTemplateId = typeof templateId === "string" ? templateId.trim() : "CUSTOM"
+    const normalizedSubject = typeof subject === "string" ? subject.trim() : ""
+    const normalizedBody = typeof body === "string" ? body.trim() : ""
+    const normalizedTrackId = typeof trackId === "string" ? trackId.trim() : ""
+
+    if (normalizedTo === "by_track" && !normalizedTrackId) {
+      return sendError(res, 422, "VALIDATION_ERROR", "trackId is required when to='by_track'")
+    }
+
+    if (!normalizedTemplateId) {
+      return sendError(res, 422, "VALIDATION_ERROR", "templateId is required")
+    }
+
+    if (normalizedTemplateId === "CUSTOM") {
+      if (!normalizedSubject) {
+        return sendError(res, 422, "VALIDATION_ERROR", "subject is required for CUSTOM template")
+      }
+      if (!normalizedBody) {
+        return sendError(res, 422, "VALIDATION_ERROR", "body is required for CUSTOM template")
+      }
+    }
+
+    const event = await prisma.event.findUnique({
+      where: { slug },
+      include: { settings: true }
+    })
     if (!event) return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
 
+    if (isTemplateBlockedByCommunicationToggles(normalizedTemplateId, event.settings)) {
+      return sendError(res, 403, "COMMUNICATION_DISABLED", "This communication type is disabled in event settings")
+    }
+
+    if (isRecipientFilterBlockedByCommunicationToggles(normalizedTo, event.settings)) {
+      return sendError(res, 403, "COMMUNICATION_DISABLED", "This communication type is disabled in event settings")
+    }
+
     // Resolve recipient list based on `to` filter
-    const recipients = await resolveRecipients(event.id, to, trackId)
+    const recipients = await resolveRecipients(event.id, normalizedTo, normalizedTrackId)
 
     if (recipients.length === 0) {
       return sendSuccess(res, { sent: 0, failed: 0, message: "No recipients found" })
@@ -64,7 +108,7 @@ export const sendBulkEmail = async (req, res) => {
     // Send emails
     let sent = 0, failed = 0
 
-    if (templateId && templateId !== "CUSTOM") {
+    if (normalizedTemplateId && normalizedTemplateId !== "CUSTOM") {
       const emailRecipients = recipients.map(r => ({
         email: r.email,
         variables: {
@@ -75,7 +119,7 @@ export const sendBulkEmail = async (req, res) => {
       }))
 
       const result = await sendBatchTemplatedEmails({
-        templateId,
+        templateId: normalizedTemplateId,
         recipients: emailRecipients,
         eventId: event.id
       })
@@ -87,8 +131,8 @@ export const sendBulkEmail = async (req, res) => {
         try {
           await sendCustomEmail({
             to: r.email,
-            subject: subject || "Update from EDC JSSUN",
-            body: (body || "").replace(/{{name}}/g, r.name).replace(/{{registrationId}}/g, r.registrationId || ""),
+            subject: normalizedSubject || "Update from EDC JSSUN",
+            body: normalizedBody.replace(/{{name}}/g, r.name).replace(/{{registrationId}}/g, r.registrationId || ""),
             eventId: event.id
           })
           sent++
@@ -98,11 +142,153 @@ export const sendBulkEmail = async (req, res) => {
       }
     }
 
-    return sendSuccess(res, { sent, failed })
+    return sendSuccess(res, {
+      sent,
+      failed,
+      status: "Delivered",
+      recipients: normalizedTo,
+      subject: normalizedSubject || normalizedTemplateId,
+      time: new Date().toISOString()
+    })
   } catch (err) {
-    console.error("sendBulkEmail error:", err)
+    console.error("sendBulkEmail error:", {
+      message: err?.message || "Unknown error",
+      slug: req.params?.slug,
+      adminUserId: req.user?.id,
+      timestamp: new Date().toISOString()
+    })
     return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to send emails")
   }
+}
+
+// ─── POST /api/admin/events/:slug/updates ──────────────────────
+
+export const postEventUpdate = async (req, res) => {
+  try {
+    const { slug } = req.params
+    const { to, trackId, subject, body } = req.body
+
+    const normalizedTo = normalizeRecipientFilter(to)
+    if (!normalizedTo) {
+      return sendError(res, 422, "VALIDATION_ERROR", "Invalid 'to' filter")
+    }
+
+    const normalizedTrackId = typeof trackId === "string" ? trackId.trim() : ""
+    const normalizedSubject = typeof subject === "string" ? subject.trim() : ""
+    const normalizedBody = typeof body === "string" ? body.trim() : ""
+
+    if (!normalizedSubject) {
+      return sendError(res, 422, "VALIDATION_ERROR", "subject is required")
+    }
+    if (!normalizedBody) {
+      return sendError(res, 422, "VALIDATION_ERROR", "body is required")
+    }
+    if (normalizedTo === "by_track" && !normalizedTrackId) {
+      return sendError(res, 422, "VALIDATION_ERROR", "trackId is required when to='by_track'")
+    }
+
+    const event = await prisma.event.findUnique({
+      where: { slug },
+      include: { settings: true }
+    })
+    if (!event) return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
+
+    if (isRecipientFilterBlockedByCommunicationToggles(normalizedTo, event.settings)) {
+      return sendError(res, 403, "COMMUNICATION_DISABLED", "This communication type is disabled in event settings")
+    }
+
+    const recipients = await resolveRecipients(event.id, normalizedTo, normalizedTrackId)
+    if (recipients.length === 0) {
+      return sendSuccess(res, {
+        posted: 0,
+        status: "Posted",
+        recipients: normalizedTo,
+        subject: normalizedSubject,
+        time: new Date().toISOString(),
+        message: "No recipients found"
+      })
+    }
+
+    await prisma.$transaction(
+      recipients.map((recipient) =>
+        prisma.emailLog.create({
+          data: {
+            eventId: event.id,
+            recipient: recipient.email,
+            type: "UPDATE_POST",
+            subject: normalizedSubject,
+            body: normalizedBody,
+            status: "POSTED"
+          }
+        })
+      )
+    )
+
+    return sendSuccess(res, {
+      posted: recipients.length,
+      status: "Posted",
+      recipients: normalizedTo,
+      subject: normalizedSubject,
+      time: new Date().toISOString()
+    })
+  } catch (err) {
+    console.error("postEventUpdate error:", {
+      message: err?.message || "Unknown error",
+      slug: req.params?.slug,
+      adminUserId: req.user?.id,
+      timestamp: new Date().toISOString()
+    })
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to post update")
+  }
+}
+
+function normalizeRecipientFilter(value) {
+  if (typeof value !== "string") return "all"
+
+  const normalized = value.trim().toLowerCase()
+  const allowed = new Set([
+    "all",
+    "shortlisted",
+    "waitlisted",
+    "rejected",
+    "checked_in",
+    "not_checked_in",
+    "by_track",
+    "submitted",
+    "not_submitted"
+  ])
+
+  return allowed.has(normalized) ? normalized : null
+}
+
+function isTemplateBlockedByCommunicationToggles(templateId, settings) {
+  if (!templateId || templateId === "CUSTOM") return false
+
+  if (["SHORTLISTED", "REJECTED", "WAITLISTED"].includes(templateId)) {
+    return settings?.notifyOnStatusChange === false
+  }
+
+  if (["PPT_REMINDER", "SUBMISSION_REMINDER", "SUBMISSION_RECEIVED"].includes(templateId)) {
+    return settings?.notifyOnSubmission === false
+  }
+
+  if (["REGISTRATION_CONFIRMED", "APPLICATION_RECEIVED"].includes(templateId)) {
+    return settings?.notifyOnRegistration === false
+  }
+
+  return false
+}
+
+function isRecipientFilterBlockedByCommunicationToggles(filter, settings) {
+  if (["shortlisted", "waitlisted", "rejected"].includes(filter)) {
+    return settings?.notifyOnStatusChange === false
+  }
+
+  if (["submitted", "not_submitted"].includes(filter)) {
+    return settings?.notifyOnSubmission === false
+  }
+
+  return false
 }
 
 // ─── GET /api/admin/events/:slug/emails/templates ───────────────

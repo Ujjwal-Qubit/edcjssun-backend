@@ -1,7 +1,7 @@
 import prisma from "../utils/prisma.js"
 import { sendError, sendSuccess, sendPaginated } from "../utils/response.js"
 import { isValidStatusTransition } from "../utils/validators.js"
-import { sendTemplatedEmail, sendBatchTemplatedEmails, buildEmailVariables } from "../services/email.service.js"
+import { sendTemplatedEmail, sendBatchTemplatedEmails, buildEmailVariables, sendCustomEmail } from "../services/email.service.js"
 import { generateQrToken } from "../services/qr.service.js"
 import { generateRegistrationId } from "../utils/generateRegistrationId.js"
 
@@ -29,7 +29,11 @@ export const getRegistrations = async (req, res) => {
         include: {
           user: { select: { name: true, email: true, year: true, branch: true, rollNo: true } },
           track: { select: { name: true } },
-          submissions: { select: { id: true } }
+          submissions: {
+            select: { id: true, fileUrl: true, fileName: true, submittedAt: true },
+            orderBy: { submittedAt: "desc" },
+            take: 1,
+          }
         }
       })
 
@@ -48,22 +52,27 @@ export const getRegistrations = async (req, res) => {
           }
           return true
         })
-        .map(r => ({
-          id: r.id,
-          type: "solo",
-          registrationId: r.registrationId,
-          name: r.user.name,
-          size: 1,
-          leadName: r.user.name,
-          leadEmail: r.user.email,
-          year: r.user.year,
-          branch: r.user.branch,
-          trackName: r.track?.name || null,
-          status: r.status,
-          checkInStatus: r.checkInStatus,
-          hasSubmission: r.submissions.length > 0,
-          submittedAt: r.submittedAt
-        }))
+        .map(r => {
+          const latestSubmission = r.submissions[0] || null
+          return {
+            id: r.id,
+            type: "solo",
+            registrationId: r.registrationId,
+            name: r.user.name,
+            size: 1,
+            leadName: r.user.name,
+            leadEmail: r.user.email,
+            year: r.user.year,
+            branch: r.user.branch,
+            trackName: r.track?.name || null,
+            status: r.status,
+            checkInStatus: r.checkInStatus,
+            hasSubmission: Boolean(latestSubmission),
+            submissionFileUrl: latestSubmission?.fileUrl || null,
+            submissionFileName: latestSubmission?.fileName || null,
+            submittedAt: latestSubmission?.submittedAt || r.submittedAt
+          }
+        })
     }
 
     // Fetch team registrations
@@ -77,7 +86,11 @@ export const getRegistrations = async (req, res) => {
         include: {
           members: { select: { name: true, email: true, year: true, branch: true, rollNo: true, isLead: true } },
           track: { select: { name: true } },
-          submissions: { select: { id: true } }
+          submissions: {
+            select: { id: true, fileUrl: true, fileName: true, submittedAt: true },
+            orderBy: { submittedAt: "desc" },
+            take: 1,
+          }
         }
       })
 
@@ -100,6 +113,7 @@ export const getRegistrations = async (req, res) => {
         })
         .map(t => {
           const lead = t.members.find(m => m.isLead)
+          const latestSubmission = t.submissions[0] || null
           return {
             id: t.id,
             type: "team",
@@ -113,8 +127,10 @@ export const getRegistrations = async (req, res) => {
             trackName: t.track?.name || null,
             status: t.status,
             checkInStatus: t.checkInStatus,
-            hasSubmission: t.submissions.length > 0,
-            submittedAt: t.submittedAt
+            hasSubmission: Boolean(latestSubmission),
+            submissionFileUrl: latestSubmission?.fileUrl || null,
+            submissionFileName: latestSubmission?.fileName || null,
+            submittedAt: latestSubmission?.submittedAt || t.submittedAt
           }
         })
     }
@@ -603,5 +619,124 @@ export const manualCheckIn = async (req, res) => {
   } catch (err) {
     console.error("manualCheckIn error:", err)
     return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to check in")
+  }
+}
+
+// ─── PATCH /api/admin/events/:slug/registrations/:id/notes ─────
+
+export const updateRegistrationNotes = async (req, res) => {
+  try {
+    const { slug, id } = req.params
+    const { notes } = req.body || {}
+
+    const event = await prisma.event.findUnique({ where: { slug } })
+    if (!event) return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
+
+    const [team, registration] = await Promise.all([
+      prisma.team.findFirst({ where: { id, eventId: event.id } }),
+      prisma.registration.findFirst({ where: { id, eventId: event.id } })
+    ])
+
+    if (!team && !registration) {
+      return sendError(res, 404, "REGISTRATION_NOT_FOUND", "Registration not found")
+    }
+
+    // Persist notes as admin activity log until a dedicated notes column is introduced.
+    await prisma.emailLog.create({
+      data: {
+        eventId: event.id,
+        recipient: `registration:${id}`,
+        type: "ADMIN_NOTE",
+        subject: "Admin note updated",
+        body: String(notes || ""),
+        status: "SAVED"
+      }
+    })
+
+    return sendSuccess(res, { id, notes: String(notes || ""), persistedAs: "EMAIL_LOG" })
+  } catch (err) {
+    console.error("updateRegistrationNotes error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to update notes")
+  }
+}
+
+// ─── POST /api/admin/events/:slug/registrations/:id/email ──────
+
+export const sendRegistrationEmail = async (req, res) => {
+  try {
+    const { slug, id } = req.params
+    const { templateId, subject, body } = req.body || {}
+
+    const event = await prisma.event.findUnique({ where: { slug } })
+    if (!event) return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
+
+    const team = await prisma.team.findFirst({
+      where: { id, eventId: event.id },
+      include: { members: { where: { isLead: true }, select: { name: true, email: true } } }
+    })
+
+    let recipientName = ""
+    let recipientEmail = ""
+    let registrationId = ""
+    let teamName = ""
+
+    if (team) {
+      const lead = team.members[0]
+      recipientName = lead?.name || team.teamName
+      recipientEmail = lead?.email || ""
+      registrationId = team.registrationId
+      teamName = team.teamName
+    } else {
+      const registration = await prisma.registration.findFirst({
+        where: { id, eventId: event.id },
+        include: { user: { select: { name: true, email: true } } }
+      })
+
+      if (!registration) {
+        return sendError(res, 404, "REGISTRATION_NOT_FOUND", "Registration not found")
+      }
+
+      recipientName = registration.user?.name || "Participant"
+      recipientEmail = registration.user?.email || ""
+      registrationId = registration.registrationId
+    }
+
+    if (!recipientEmail) {
+      return sendError(res, 422, "VALIDATION_ERROR", "Recipient email not available")
+    }
+
+    const variables = buildEmailVariables({
+      user: { name: recipientName },
+      event,
+      registrationId,
+      teamName
+    })
+
+    if (templateId && templateId !== "CUSTOM") {
+      await sendTemplatedEmail({
+        templateId,
+        to: recipientEmail,
+        variables,
+        eventId: event.id
+      })
+    } else {
+      await sendCustomEmail({
+        to: recipientEmail,
+        subject: subject || `Update for ${event.title}`,
+        body: String(body || "")
+          .replace(/{{name}}/g, recipientName)
+          .replace(/{{registrationId}}/g, registrationId),
+        eventId: event.id
+      })
+    }
+
+    return sendSuccess(res, {
+      id,
+      recipient: recipientEmail,
+      status: "SENT"
+    })
+  } catch (err) {
+    console.error("sendRegistrationEmail error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to send registration email")
   }
 }

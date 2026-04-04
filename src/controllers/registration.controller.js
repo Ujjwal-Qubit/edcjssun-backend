@@ -1,19 +1,13 @@
-import crypto from "crypto"
-import bcrypt from "bcryptjs"
 import { Prisma } from "@prisma/client"
 import prisma from "../utils/prisma.js"
 import { sendError, sendSuccess } from "../utils/response.js"
-import { collectMemberValidationErrors, isNonEmptyString, isValidEmail, validateSoloRegistration } from "../utils/validators.js"
+import { collectMemberValidationErrors, isNonEmptyString, validateSoloRegistration } from "../utils/validators.js"
 import {
   sendTemplatedEmail,
-  sendSetupPasswordEmail,
   buildEmailVariables
 } from "../services/email.service.js"
 import { generateRegistrationId } from "../utils/generateRegistrationId.js"
 import { generateQrToken } from "../services/qr.service.js"
-
-const BCRYPT_ROUNDS = 12
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173"
 
 // ─── POST /api/events/:slug/register ────────────────────────────
 
@@ -39,6 +33,12 @@ export const register = async (req, res) => {
 
 async function handleSoloRegistration(req, res, slug) {
   const { name, email, phone, rollNo, year, branch, institution, trackId, hearAboutUs } = req.body
+  const authenticatedUserId = req.user?.id
+  const authenticatedEmail = req.user?.email?.trim().toLowerCase()
+
+  if (!authenticatedUserId || !authenticatedEmail) {
+    throw createError(401, "MISSING_TOKEN", "Authentication required")
+  }
 
   // Step 1: Load event
   const event = await loadAndValidateEvent(slug)
@@ -58,7 +58,10 @@ async function handleSoloRegistration(req, res, slug) {
     throw createError(422, "VALIDATION_ERROR", "Validation failed", null, details)
   }
 
-  const normalizedEmail = email.trim().toLowerCase()
+  const normalizedEmail = (email || "").trim().toLowerCase() || authenticatedEmail
+  if (normalizedEmail !== authenticatedEmail) {
+    throw createError(422, "VALIDATION_ERROR", "Registration email must match authenticated account", "email")
+  }
 
   // Step 6: Validate track
   if (event.hasTracks && trackId) {
@@ -67,22 +70,18 @@ async function handleSoloRegistration(req, res, slug) {
   }
 
   // Step 6b: Check cross-registration (solo + team for same event)
-  const existingUser = await findOrPrepareUser(normalizedEmail)
-  if (existingUser) {
-    // Check if already has solo registration
-    const existingSoloReg = await prisma.registration.findFirst({
-      where: { userId: existingUser.id, eventId: event.id }
-    })
-    if (existingSoloReg) {
-      throw createError(409, "ALREADY_REGISTERED", "Already registered for this event")
-    }
-    // Check if in a team
-    const existingTeamMember = await prisma.teamMember.findFirst({
-      where: { userId: existingUser.id, team: { eventId: event.id } }
-    })
-    if (existingTeamMember) {
-      throw createError(409, "ALREADY_REGISTERED", "Already registered in a team for this event")
-    }
+  const existingSoloReg = await prisma.registration.findFirst({
+    where: { userId: authenticatedUserId, eventId: event.id }
+  })
+  if (existingSoloReg) {
+    throw createError(409, "ALREADY_REGISTERED", "Already registered for this event")
+  }
+
+  const existingTeamMember = await prisma.teamMember.findFirst({
+    where: { userId: authenticatedUserId, team: { eventId: event.id } }
+  })
+  if (existingTeamMember) {
+    throw createError(409, "ALREADY_REGISTERED", "Already registered in a team for this event")
   }
 
   // Step 7: Transaction
@@ -95,44 +94,19 @@ async function handleSoloRegistration(req, res, slug) {
         const registrationId = await generateRegistrationId(tx, event.id, event.slug, "solo")
         const initialStatus = determineInitialStatus(event.registrationMode)
 
-        // Find or create user
-        let userId
-        let isNewUser = false
-        let setupTokenValue = null
+        const userId = authenticatedUserId
 
-        const user = await tx.user.findUnique({ where: { email: normalizedEmail } })
-        if (user) {
-          userId = user.id
-        } else {
-          isNewUser = true
-          const tempPassword = crypto.randomBytes(18).toString("hex")
-          const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_ROUNDS)
-
-          const newUser = await tx.user.create({
-            data: {
-              name: name.trim(),
-              email: normalizedEmail,
-              password: hashedPassword,
-              role: "PARTICIPANT",
-              isVerified: false,
-              phone: phone || null,
-              institution: institution || null,
-              year: year || null,
-              branch: branch || null,
-              rollNo: rollNo || null
-            }
-          })
-          userId = newUser.id
-
-          setupTokenValue = crypto.randomBytes(32).toString("hex")
-          await tx.setupPasswordToken.create({
-            data: {
-              userId: newUser.id,
-              token: setupTokenValue,
-              expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000)
-            }
-          })
-        }
+        await tx.user.update({
+          where: { id: userId },
+          data: {
+            name: isNonEmptyString(name) ? name.trim() : undefined,
+            phone: isNonEmptyString(phone) ? phone.trim() : undefined,
+            institution: isNonEmptyString(institution) ? institution.trim() : undefined,
+            year: isNonEmptyString(year) ? String(year).trim() : undefined,
+            branch: isNonEmptyString(branch) ? branch.trim() : undefined,
+            rollNo: isNonEmptyString(rollNo) ? rollNo.trim() : undefined
+          }
+        })
 
         // Generate QR token if check-in required
         const qrCode = event.requiresCheckIn ? generateQrToken() : null
@@ -153,10 +127,8 @@ async function handleSoloRegistration(req, res, slug) {
         return {
           registration,
           registrationId,
-          isNewUser,
-          setupTokenValue,
-          email: normalizedEmail,
-          name: name.trim(),
+          email: authenticatedEmail,
+          name: isNonEmptyString(name) ? name.trim() : (req.user?.name || "Participant"),
           qrCode
         }
       }, {
@@ -187,6 +159,12 @@ async function handleSoloRegistration(req, res, slug) {
 
 async function handleTeamRegistration(req, res, slug) {
   const { teamName, teamSize, members, trackId, hearAboutUs } = req.body
+  const authenticatedUserId = req.user?.id
+  const authenticatedEmail = req.user?.email?.trim().toLowerCase()
+
+  if (!authenticatedUserId || !authenticatedEmail) {
+    throw createError(401, "MISSING_TOKEN", "Authentication required")
+  }
 
   // Step 1: Load event
   const event = await loadAndValidateEvent(slug)
@@ -258,8 +236,10 @@ async function handleTeamRegistration(req, res, slug) {
     rollNo: m.rollNo ? m.rollNo.trim() : null,
     year: m.year ? String(m.year) : null,
     branch: m.branch ? m.branch.trim() : null,
-    email: m.email.trim().toLowerCase(),
-    phone: m.phone ? m.phone.trim() : null,
+    institution: isNonEmptyString(m.institution) ? m.institution.trim() : null,
+    email: isNonEmptyString(m.email) ? m.email.trim().toLowerCase() : "",
+    phone: isNonEmptyString(m.phone) ? m.phone.trim() : null,
+    whatsapp: isNonEmptyString(m.whatsapp) ? m.whatsapp.trim() : null,
     isLead: m.isLead
   }))
 
@@ -277,24 +257,28 @@ async function handleTeamRegistration(req, res, slug) {
     }
   }
 
-  // Check cross-registration for lead
+  // Check cross-registration for authenticated lead
   const lead = normalizedMembers.find(m => m.isLead)
-  if (lead) {
-    const leadUser = await prisma.user.findUnique({ where: { email: lead.email } })
-    if (leadUser) {
-      const existingSoloReg = await prisma.registration.findFirst({
-        where: { userId: leadUser.id, eventId: event.id }
-      })
-      if (existingSoloReg) {
-        throw createError(409, "ALREADY_REGISTERED", "Team lead is already registered solo for this event")
-      }
-      const existingTeamMember = await prisma.teamMember.findFirst({
-        where: { userId: leadUser.id, team: { eventId: event.id } }
-      })
-      if (existingTeamMember) {
-        throw createError(409, "ALREADY_REGISTERED", "Team lead is already in a team for this event")
-      }
-    }
+  if (!lead) {
+    throw createError(422, "VALIDATION_ERROR", "Team lead is required", "isLead")
+  }
+
+  if (!lead.email || lead.email !== authenticatedEmail) {
+    throw createError(422, "VALIDATION_ERROR", "Team lead email must match authenticated account", "members")
+  }
+
+  const existingSoloReg = await prisma.registration.findFirst({
+    where: { userId: authenticatedUserId, eventId: event.id }
+  })
+  if (existingSoloReg) {
+    throw createError(409, "ALREADY_REGISTERED", "Team lead is already registered solo for this event")
+  }
+
+  const existingTeamMember = await prisma.teamMember.findFirst({
+    where: { userId: authenticatedUserId, team: { eventId: event.id } }
+  })
+  if (existingTeamMember) {
+    throw createError(409, "ALREADY_REGISTERED", "Team lead is already in a team for this event")
   }
 
   // Step 7: Transaction
@@ -305,7 +289,7 @@ async function handleTeamRegistration(req, res, slug) {
     try {
       result = await prisma.$transaction(async (tx) => {
         const registrationId = await generateRegistrationId(tx, event.id, event.slug, "team")
-        const initialStatus = determineInitialStatus(event.registrationMode)
+        const initialStatus = "PENDING"
         const qrCode = event.requiresCheckIn ? generateQrToken() : null
 
         const team = await tx.team.create({
@@ -321,43 +305,10 @@ async function handleTeamRegistration(req, res, slug) {
           }
         })
 
-        let leadEmail = null
-        let isNewUser = false
-        let setupTokenValue = null
+        let leadEmail = authenticatedEmail
 
         for (const member of normalizedMembers) {
-          let linkedUserId = null
-
-          const existingUser = await tx.user.findUnique({ where: { email: member.email } })
-
-          if (existingUser) {
-            linkedUserId = existingUser.id
-          } else if (member.isLead) {
-            isNewUser = true
-            const tempPassword = crypto.randomBytes(18).toString("hex")
-            const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_ROUNDS)
-
-            const newUser = await tx.user.create({
-              data: {
-                name: member.name,
-                email: member.email,
-                password: hashedPassword,
-                role: "PARTICIPANT",
-                isVerified: false
-              }
-            })
-
-            linkedUserId = newUser.id
-
-            setupTokenValue = crypto.randomBytes(32).toString("hex")
-            await tx.setupPasswordToken.create({
-              data: {
-                userId: newUser.id,
-                token: setupTokenValue,
-                expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000)
-              }
-            })
-          }
+          const linkedUserId = member.isLead ? authenticatedUserId : null
 
           if (member.isLead) {
             leadEmail = member.email
@@ -371,8 +322,10 @@ async function handleTeamRegistration(req, res, slug) {
               rollNo: member.rollNo || null,
               year: member.year || null,
               branch: member.branch || null,
+              institution: member.institution || null,
               email: member.email,
               phone: member.phone || null,
+              whatsapp: member.whatsapp || null,
               isLead: member.isLead
             }
           })
@@ -381,8 +334,6 @@ async function handleTeamRegistration(req, res, slug) {
         return {
           team,
           registrationId,
-          isNewUser,
-          setupTokenValue,
           email: leadEmail,
           name: teamName.trim(),
           qrCode
@@ -428,11 +379,14 @@ async function loadAndValidateEvent(slug) {
 }
 
 function validateRegistrationWindow(event) {
-  if (!event.registrationOpen) {
+  const effectiveRegistrationOpen = event?.settings?.registrationOpen ?? event.registrationOpen
+  const effectiveRegistrationDeadline = event?.settings?.registrationDeadline ?? event.registrationDeadline
+
+  if (!effectiveRegistrationOpen) {
     throw createError(403, "REGISTRATION_CLOSED", "Registration is closed")
   }
 
-  if (event.registrationDeadline && new Date() >= event.registrationDeadline) {
+  if (effectiveRegistrationDeadline && new Date() >= effectiveRegistrationDeadline) {
     throw createError(403, "REGISTRATION_CLOSED", "Registration deadline has passed")
   }
 
@@ -443,11 +397,13 @@ function validateRegistrationWindow(event) {
 
 async function validateCapacity(event) {
   if (event.maxParticipants) {
-    const [soloCount, teamCount] = await Promise.all([
+    const [soloCount, teamMemberCount] = await Promise.all([
       prisma.registration.count({ where: { eventId: event.id } }),
-      prisma.team.count({ where: { eventId: event.id } })
+      prisma.teamMember.count({ where: { team: { eventId: event.id } } })
     ])
-    if (soloCount + teamCount >= event.maxParticipants) {
+
+    const totalParticipants = soloCount + teamMemberCount
+    if (totalParticipants >= event.maxParticipants) {
       throw createError(422, "EVENT_FULL", "Event has reached maximum capacity")
     }
   }
@@ -462,12 +418,12 @@ function determineInitialStatus(registrationMode) {
   }
 }
 
-async function findOrPrepareUser(email) {
-  return prisma.user.findUnique({ where: { email } })
-}
-
 async function sendPostRegistrationEmails(result, event) {
   try {
+    if (event?.settings?.notifyOnRegistration === false) {
+      return
+    }
+
     const templateId = event.registrationMode === "OPEN_ACCESS"
       ? "REGISTRATION_CONFIRMED"
       : "APPLICATION_RECEIVED"
@@ -488,21 +444,6 @@ async function sendPostRegistrationEmails(result, event) {
   } catch (err) {
     console.error("Registration email failed:", err)
   }
-
-  // Send setup password email if new user
-  if (result.isNewUser && result.setupTokenValue) {
-    try {
-      const setupLink = `${FRONTEND_URL}/auth/setup-password?token=${result.setupTokenValue}`
-      await sendSetupPasswordEmail({
-        email: result.email,
-        setupLink,
-        eventName: event.title,
-        name: result.name
-      })
-    } catch (err) {
-      console.error("Setup password email failed:", err)
-    }
-  }
 }
 
 function createError(status, code, message, field, details) {
@@ -520,14 +461,17 @@ function handleRegistrationError(res, err) {
   }
 
   if (err.code === "P2002") {
-    const target = err.meta?.target
+    const target = Array.isArray(err.meta?.target) ? err.meta.target : [err.meta?.target]
     if (target?.includes("rollNo")) {
       return sendError(res, 409, "DUPLICATE_ROLLNO", "Roll number already registered")
     }
     if (target?.includes("userId") && target?.includes("eventId")) {
       return sendError(res, 409, "ALREADY_REGISTERED", "Already registered for this event")
     }
-    return sendError(res, 409, "CONFLICT", "A duplicate record exists")
+    if (target?.includes("registrationId")) {
+      return sendError(res, 409, "CONFLICT", "A registration conflict occurred. Please retry once.")
+    }
+    return sendError(res, 409, "CONFLICT", "A similar registration already exists. Please review and try again.")
   }
 
   console.error("Registration error:", err)

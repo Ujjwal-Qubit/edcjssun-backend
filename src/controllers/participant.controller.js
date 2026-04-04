@@ -1,7 +1,43 @@
 import prisma from "../utils/prisma.js"
+import path from "path"
 import { sendError, sendSuccess } from "../utils/response.js"
 import { upload, uploadSubmissionFile, validateFileType, validateFileSize } from "../services/upload.service.js"
 import { sendTemplatedEmail, buildEmailVariables } from "../services/email.service.js"
+import { generateQrToken } from "../services/qr.service.js"
+
+const STORAGE_HARD_CAP_MB = Number(process.env.CLOUDINARY_MAX_FILE_SIZE_MB || 20)
+
+const sanitizeNameSegment = (value, fallback = "NA") => {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+  return cleaned || fallback
+}
+
+const getInstitutionShortCode = (institution) => {
+  const token = String(institution || "").toLowerCase()
+  if (token.includes("university") || token.includes("jssun")) return "JSSUN"
+  return "JSSATEN"
+}
+
+const resolveFileExtension = (originalname, mimeType) => {
+  const fromName = path.extname(String(originalname || "")).toLowerCase().replace(/^\./, "")
+  if (["ppt", "pptx", "pdf"].includes(fromName)) return fromName
+
+  const mime = String(mimeType || "").toLowerCase()
+  if (mime.includes("pdf")) return "pdf"
+  if (mime.includes("presentation") || mime.includes("powerpoint")) return "pptx"
+  return "pdf"
+}
+
+const buildSubmissionFileName = ({ teamName, registrationId, institution, originalname, mimeType }) => {
+  const ext = resolveFileExtension(originalname, mimeType)
+  const teamToken = sanitizeNameSegment(teamName, "Team")
+  const regToken = sanitizeNameSegment(registrationId, "REG")
+  const institutionToken = getInstitutionShortCode(institution)
+  return `${teamToken}-${regToken}-${institutionToken}.${ext}`
+}
 
 // ─── GET /api/participant/:slug/registration ────────────────────
 
@@ -10,7 +46,10 @@ export const getMyRegistration = async (req, res) => {
     const userId = req.user.id
     const { slug } = req.params
 
-    const event = await prisma.event.findUnique({ where: { slug } })
+    const event = await prisma.event.findUnique({
+      where: { slug },
+      include: { settings: true }
+    })
     if (!event) {
       return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
     }
@@ -72,7 +111,18 @@ export const getMyRegistration = async (req, res) => {
           include: {
             track: { select: { id: true, name: true } },
             members: {
-              select: { id: true, name: true, rollNo: true, year: true, branch: true, email: true, phone: true, isLead: true }
+              select: {
+                id: true,
+                name: true,
+                rollNo: true,
+                year: true,
+                branch: true,
+                institution: true,
+                email: true,
+                phone: true,
+                whatsapp: true,
+                isLead: true
+              }
             },
             submissions: {
               include: { round: { select: { id: true, name: true } } },
@@ -264,13 +314,27 @@ export const submitDeliverable = async (req, res) => {
     let teamId = null
     let registrationId = null
     let submitterRegId = null
+    let submitterTeamName = null
+    let submitterInstitution = null
 
     if (req.registrationType === "solo") {
       registrationId = req.registration.id
       submitterRegId = req.registration.registrationId
+      const owner = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { name: true, institution: true }
+      })
+      submitterTeamName = owner?.name || "Participant"
+      submitterInstitution = owner?.institution || "JSSATEN"
     } else if (req.registrationType === "team") {
       teamId = req.team.id
       submitterRegId = req.team.registrationId
+      submitterTeamName = req.team.teamName || "Team"
+      const leadMember = await prisma.teamMember.findFirst({
+        where: { teamId: req.team.id, isLead: true },
+        select: { institution: true }
+      })
+      submitterInstitution = leadMember?.institution || "JSSATEN"
     } else {
       return sendError(res, 403, "NOT_ELIGIBLE", "Not eligible to submit")
     }
@@ -282,26 +346,41 @@ export const submitDeliverable = async (req, res) => {
 
     if (submissionType === "FILE" || submissionType === "MIXED") {
       if (req.file) {
+        const configuredRoundLimitMb = Number(round.maxFileSize || 20)
+        const effectiveMaxFileSizeMb = Math.min(configuredRoundLimitMb, STORAGE_HARD_CAP_MB)
+
         // Validate file type
         if (!validateFileType(req.file.originalname, round.acceptedFileTypes)) {
           return sendError(res, 422, "INVALID_FILE_TYPE", `Accepted types: ${round.acceptedFileTypes || "common document types"}`)
         }
         // Validate file size
-        if (!validateFileSize(req.file.size, round.maxFileSize)) {
-          return sendError(res, 422, "FILE_TOO_LARGE", `Max file size: ${round.maxFileSize || 25}MB`)
+        if (!validateFileSize(req.file.size, effectiveMaxFileSizeMb)) {
+          return sendError(res, 422, "FILE_TOO_LARGE", `Max file size: ${effectiveMaxFileSizeMb}MB`)
         }
         // Upload to cloudinary
         try {
+          const canonicalFileName = buildSubmissionFileName({
+            teamName: submitterTeamName,
+            registrationId: submitterRegId,
+            institution: submitterInstitution,
+            originalname: req.file.originalname,
+            mimeType: req.file.mimetype,
+          })
+
           const uploaded = await uploadSubmissionFile(req.file, {
             eventSlug: event.slug,
             roundOrder: round.order,
-            registrationId: submitterRegId
+            registrationId: submitterRegId,
+            fileName: canonicalFileName,
           })
           fileUrl = uploaded.fileUrl
           fileName = uploaded.fileName
           fileSize = uploaded.fileSize
         } catch (uploadErr) {
           console.error("Upload failed:", uploadErr)
+          if (String(uploadErr?.message || "").toLowerCase().includes("file size too large")) {
+            return sendError(res, 422, "FILE_TOO_LARGE", `Max file size: ${STORAGE_HARD_CAP_MB}MB`)
+          }
           return sendError(res, 500, "UPLOAD_FAILED", "File upload failed")
         }
       } else if (submissionType === "FILE") {
@@ -461,5 +540,140 @@ export const getMySubmissions = async (req, res) => {
   } catch (err) {
     console.error("getMySubmissions error:", err)
     return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to fetch submissions")
+  }
+}
+
+// ─── GET /api/participant/:slug/checkin-token ──────────────────
+
+export const getCheckinToken = async (req, res) => {
+  try {
+    const userId = req.user.id
+    const { slug } = req.params
+
+    const event = await prisma.event.findUnique({ where: { slug } })
+    if (!event) {
+      return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
+    }
+
+    const ensureToken = async (recordType, recordId, existingToken) => {
+      if (existingToken) {
+        return existingToken
+      }
+
+      const token = generateQrToken()
+      if (recordType === "team") {
+        await prisma.team.update({ where: { id: recordId }, data: { qrCode: token } })
+      } else {
+        await prisma.registration.update({ where: { id: recordId }, data: { qrCode: token } })
+      }
+      return token
+    }
+
+    const soloReg = await prisma.registration.findUnique({
+      where: { userId_eventId: { userId, eventId: event.id } }
+    })
+
+    if (soloReg) {
+      const token = await ensureToken("solo", soloReg.id, soloReg.qrCode)
+      return sendSuccess(res, {
+        token,
+        registrationId: soloReg.registrationId,
+        type: "solo",
+        checkInStatus: soloReg.checkInStatus,
+        checkInTime: soloReg.checkInTime
+      })
+    }
+
+    const teamMember = await prisma.teamMember.findFirst({
+      where: { userId, team: { eventId: event.id } },
+      include: { team: true }
+    })
+
+    if (teamMember?.team) {
+      const token = await ensureToken("team", teamMember.team.id, teamMember.team.qrCode)
+      return sendSuccess(res, {
+        token,
+        registrationId: teamMember.team.registrationId,
+        type: "team",
+        checkInStatus: teamMember.team.checkInStatus,
+        checkInTime: teamMember.team.checkInTime
+      })
+    }
+
+    return sendError(res, 404, "REGISTRATION_NOT_FOUND", "Not registered for this event")
+  } catch (err) {
+    console.error("getCheckinToken error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to generate check-in token")
+  }
+}
+
+// ─── GET /api/participant/:slug/updates ───────────────────────
+
+export const getMyUpdates = async (req, res) => {
+  try {
+    const userId = req.user.id
+    const { slug } = req.params
+
+    const event = await prisma.event.findUnique({ where: { slug } })
+    if (!event) {
+      return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
+    }
+
+    const recipientEmails = new Set([String(req.user.email || "").toLowerCase()])
+
+    const soloReg = await prisma.registration.findUnique({
+      where: { userId_eventId: { userId, eventId: event.id } },
+      include: { user: { select: { email: true } } }
+    })
+
+    if (soloReg?.user?.email) {
+      recipientEmails.add(String(soloReg.user.email).toLowerCase())
+    } else {
+      const teamMember = await prisma.teamMember.findFirst({
+        where: { userId, team: { eventId: event.id } },
+        include: {
+          team: {
+            include: {
+              members: { select: { email: true } }
+            }
+          }
+        }
+      })
+
+      if (!teamMember?.team) {
+        return sendError(res, 404, "REGISTRATION_NOT_FOUND", "Not registered for this event")
+      }
+
+      for (const member of teamMember.team.members || []) {
+        if (member?.email) {
+          recipientEmails.add(String(member.email).toLowerCase())
+        }
+      }
+    }
+
+    const updates = await prisma.emailLog.findMany({
+      where: {
+        eventId: event.id,
+        recipient: {
+          in: Array.from(recipientEmails)
+        }
+      },
+      orderBy: { sentAt: "desc" },
+      take: 100
+    })
+
+    return sendSuccess(res, {
+      updates: updates.map((entry) => ({
+        id: entry.id,
+        type: entry.type,
+        subject: entry.subject,
+        body: entry.body,
+        status: entry.status,
+        sentAt: entry.sentAt
+      }))
+    })
+  } catch (err) {
+    console.error("getMyUpdates error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to fetch updates")
   }
 }

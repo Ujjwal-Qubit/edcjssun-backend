@@ -20,7 +20,7 @@ const DEFAULT_ALLOWED = [".pptx", ".pdf", ".zip", ".png", ".jpg", ".jpeg", ".doc
  */
 export const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB hard cap
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB hard cap
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase()
     if (BLOCKED_EXTENSIONS.includes(ext)) {
@@ -35,6 +35,7 @@ export const upload = multer({
  */
 export function validateFileType(originalname, acceptedFileTypes) {
   const ext = path.extname(originalname).toLowerCase()
+  const bareExt = ext.replace(/^\./, "")
 
   if (BLOCKED_EXTENSIONS.includes(ext)) {
     return false
@@ -44,15 +45,28 @@ export function validateFileType(originalname, acceptedFileTypes) {
     return DEFAULT_ALLOWED.includes(ext)
   }
 
-  const allowed = acceptedFileTypes.split(",").map(t => t.trim().toLowerCase())
-  return allowed.includes(ext)
+  const allowed = acceptedFileTypes
+    .split(",")
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean)
+    .map((token) => {
+      if (token.startsWith(".")) return token
+      if (token.includes("/")) {
+        if (token.includes("pdf")) return ".pdf"
+        if (token.includes("presentation") || token.includes("powerpoint")) return ".pptx"
+        return token
+      }
+      return `.${token}`
+    })
+
+  return allowed.includes(ext) || allowed.includes(`.${bareExt}`)
 }
 
 /**
  * Validate file size against round's maxFileSize (in MB)
  */
 export function validateFileSize(fileSize, maxFileSizeMB) {
-  const limit = maxFileSizeMB ? maxFileSizeMB * 1024 * 1024 : 25 * 1024 * 1024
+  const limit = maxFileSizeMB ? maxFileSizeMB * 1024 * 1024 : 20 * 1024 * 1024
   return fileSize <= limit
 }
 
@@ -82,16 +96,17 @@ export async function uploadToCloudinary(buffer, { folder, publicId, resourceTyp
 /**
  * Upload submission file
  */
-export async function uploadSubmissionFile(file, { eventSlug, roundOrder, registrationId }) {
-  const ext = path.extname(file.originalname).toLowerCase()
-  const timestamp = Date.now()
+export async function uploadSubmissionFile(file, { eventSlug, roundOrder, registrationId, fileName }) {
+  const selectedName = fileName || file.originalname
+  const ext = path.extname(selectedName).toLowerCase()
+  const baseName = path.basename(selectedName, ext)
   const folder = `events/${eventSlug}/submissions/round-${roundOrder}`
-  const publicId = `${registrationId}_${timestamp}`
+  const publicId = `${registrationId}_${baseName}${ext}`
 
   const result = await uploadToCloudinary(file.buffer, { folder, publicId })
   return {
     fileUrl: result.secure_url,
-    fileName: file.originalname,
+    fileName: selectedName,
     fileSize: file.size
   }
 }

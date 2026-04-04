@@ -1,5 +1,6 @@
 import prisma from "../utils/prisma.js"
 import { sendError, sendSuccess, sendPaginated } from "../utils/response.js"
+import { sendBatchTemplatedEmails, buildEmailVariables } from "../services/email.service.js"
 
 // ─── GET /api/admin/events/:slug/submissions ────────────────────
 
@@ -127,19 +128,116 @@ export const exportSubmissions = async (req, res) => {
       }
     })
 
-    // Return as JSON with file URLs for download
-    // (actual ZIP generation would require streaming which is complex)
-    const files = submissions.map(s => ({
-      registrationId: s.team?.registrationId || s.registration?.registrationId || "unknown",
-      roundName: s.round?.name || "general",
-      fileUrl: s.fileUrl,
-      fileName: s.fileName,
-      fileSize: s.fileSize
+    const rows = submissions.map((s) => ({
+      "Registration ID": s.team?.registrationId || s.registration?.registrationId || "unknown",
+      "Round": s.round?.name || "general",
+      "File Name": s.fileName || "",
+      "File Size": s.fileSize || "",
+      "File URL": s.fileUrl || ""
     }))
 
-    return sendSuccess(res, { files, total: files.length })
+    if (rows.length === 0) {
+      res.setHeader("Content-Type", "text/csv")
+      res.setHeader("Content-Disposition", `attachment; filename="${slug}_submissions.csv"`)
+      res.setHeader("X-File-Name", `${slug}_submissions.csv`)
+      return res.send("No submissions")
+    }
+
+    const allKeys = [...new Set(rows.flatMap((row) => Object.keys(row)))]
+    const header = allKeys.join(",")
+    const csvRows = rows.map((row) =>
+      allKeys
+        .map((key) => {
+          const value = row[key] || ""
+          return `"${String(value).replace(/"/g, '""')}"`
+        })
+        .join(",")
+    )
+
+    const csv = [header, ...csvRows].join("\n")
+
+    res.setHeader("Content-Type", "text/csv")
+    res.setHeader("Content-Disposition", `attachment; filename="${slug}_submissions.csv"`)
+    res.setHeader("X-File-Name", `${slug}_submissions.csv`)
+    return res.send(csv)
   } catch (err) {
     console.error("exportSubmissions error:", err)
     return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to export submissions")
+  }
+}
+
+// ─── POST /api/admin/events/:slug/submissions/reminders ─────────
+
+export const sendSubmissionReminders = async (req, res) => {
+  try {
+    const { slug } = req.params
+    const { ids } = req.body || {}
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return sendError(res, 400, "VALIDATION_ERROR", "ids array is required")
+    }
+
+    const event = await prisma.event.findUnique({ where: { slug } })
+    if (!event) return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
+
+    const submissions = await prisma.submission.findMany({
+      where: { id: { in: ids }, eventId: event.id },
+      include: {
+        round: { select: { submissionDeadline: true } },
+        team: {
+          select: {
+            registrationId: true,
+            teamName: true,
+            members: { where: { isLead: true }, select: { name: true, email: true } }
+          }
+        },
+        registration: {
+          select: {
+            registrationId: true,
+            user: { select: { name: true, email: true } }
+          }
+        }
+      }
+    })
+
+    const recipients = submissions
+      .map((submission) => {
+        const lead = submission.team?.members?.[0]
+        const recipientName = lead?.name || submission.registration?.user?.name
+        const recipientEmail = lead?.email || submission.registration?.user?.email
+        const registrationId = submission.team?.registrationId || submission.registration?.registrationId || ""
+        if (!recipientEmail) return null
+
+        const variables = buildEmailVariables({
+          user: { name: recipientName },
+          event,
+          registrationId,
+          teamName: submission.team?.teamName || ""
+        })
+        variables.submissionDeadline = submission.round?.submissionDeadline
+          ? new Date(submission.round.submissionDeadline).toISOString()
+          : ""
+
+        return {
+          email: recipientEmail,
+          variables
+        }
+      })
+      .filter(Boolean)
+
+    if (recipients.length === 0) {
+      return sendSuccess(res, { sent: 0, failed: 0, message: "No recipients found" })
+    }
+
+    const result = await sendBatchTemplatedEmails({
+      templateId: "SUBMISSION_REMINDER",
+      recipients,
+      eventId: event.id
+    })
+
+    return sendSuccess(res, result)
+  } catch (err) {
+    console.error("sendSubmissionReminders error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to send reminders")
   }
 }

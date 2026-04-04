@@ -29,13 +29,23 @@ export async function generateRegistrationId(tx, eventId, eventSlug, type) {
   const prefix = derivePrefix(eventSlug)
   const typeCode = type === "solo" ? "S" : "T"
 
-  let count
-  if (type === "solo") {
-    count = await tx.registration.count({ where: { eventId } })
-  } else {
-    count = await tx.team.count({ where: { eventId } })
+  const existingIds = type === "solo"
+    ? await tx.registration.findMany({ where: { eventId }, select: { registrationId: true } })
+    : await tx.team.findMany({ where: { eventId }, select: { registrationId: true } })
+
+  const basePrefix = `${prefix}-${typeCode}-`
+  let maxSequence = 0
+
+  for (const row of existingIds) {
+    const id = row?.registrationId || ""
+    if (!id.startsWith(basePrefix)) continue
+    const seqToken = id.slice(basePrefix.length)
+    const seqNum = Number.parseInt(seqToken, 10)
+    if (Number.isInteger(seqNum) && seqNum > maxSequence) {
+      maxSequence = seqNum
+    }
   }
 
-  const sequence = String(count + 1).padStart(4, "0")
+  const sequence = String(maxSequence + 1).padStart(4, "0")
   return `${prefix}-${typeCode}-${sequence}`
 }

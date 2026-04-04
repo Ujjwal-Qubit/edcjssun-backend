@@ -7,10 +7,34 @@ export const getAllEvents = async (req, res) => {
       where: {
         isPublic: true,
         status: { not: 'DRAFT' }
+      },
+      include: {
+        _count: {
+          select: {
+            registrations: true
+          }
+        }
       }
     })
 
-    return sendSuccess(res, events)
+    const withParticipants = await Promise.all(
+      events.map(async (event) => {
+        const teamMembersCount = await prisma.teamMember.count({
+          where: {
+            team: {
+              eventId: event.id
+            }
+          }
+        })
+
+        return {
+          ...event,
+          participants: (event?._count?.registrations || 0) + teamMembersCount
+        }
+      })
+    )
+
+    return sendSuccess(res, withParticipants)
   } catch (err) {
     console.error('getAllEvents error:', err)
     return sendError(res, 500, 'EVENTS_FETCH_FAILED', 'Failed to fetch events')
@@ -34,7 +58,21 @@ export const getEventBySlug = async (req, res) => {
       return sendError(res, 404, 'EVENT_NOT_FOUND', 'Event not found')
     }
 
-    return sendSuccess(res, event)
+    const [soloRegistrationsCount, teamMembersCount] = await Promise.all([
+      prisma.registration.count({ where: { eventId: event.id } }),
+      prisma.teamMember.count({
+        where: {
+          team: {
+            eventId: event.id
+          }
+        }
+      })
+    ])
+
+    return sendSuccess(res, {
+      ...event,
+      participants: soloRegistrationsCount + teamMembersCount
+    })
   } catch (err) {
     console.error('getEventBySlug error:', err)
     return sendError(res, 500, 'EVENT_FETCH_FAILED', 'Failed to fetch event')

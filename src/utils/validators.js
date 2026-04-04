@@ -1,5 +1,5 @@
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-const PHONE_RE = /^\d{10}$/
+const PHONE_RE = /^[6-9]\d{9}$/
 
 export const isNonEmptyString = (value) => {
   return typeof value === "string" && value.trim().length > 0
@@ -37,13 +37,31 @@ export const collectMemberValidationErrors = (members) => {
 
   members.forEach((member, index) => {
     const base = `members[${index}]`
+    const isLead = Boolean(member?.isLead)
 
     if (!isNonEmptyString(member?.name)) {
       details[`${base}.name`] = "Name is required"
     }
 
-    if (!isValidEmail(member?.email)) {
+    if (!isNonEmptyString(member?.rollNo)) {
+      details[`${base}.rollNo`] = "Roll number is required"
+    }
+
+    if (isLead) {
+      if (!isValidEmail(member?.email)) {
+        details[`${base}.email`] = "Lead email is required and must be valid"
+      }
+      if (!isNonEmptyString(member?.phone)) {
+        details[`${base}.phone`] = "Lead phone is required"
+      } else if (!isValidPhone(member?.phone)) {
+        details[`${base}.phone`] = "Lead phone must be a valid Indian mobile number (10 digits)"
+      }
+    } else if (isNonEmptyString(member?.email) && !isValidEmail(member?.email)) {
       details[`${base}.email`] = "Invalid email"
+    }
+
+    if (!isLead && isNonEmptyString(member?.phone) && !isValidPhone(member?.phone)) {
+      details[`${base}.phone`] = "Phone must be a valid Indian mobile number (10 digits)"
     }
 
     if (typeof member?.isLead !== "boolean") {

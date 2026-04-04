@@ -231,8 +231,8 @@ export const publishResults = async (req, res) => {
       })
 
       const recipients = [
-        ...soloRegs.map(r => ({ email: r.user.email, variables: { name: r.user.name, eventName: event.title, dashboardUrl: `${FRONTEND_URL}/${event.slug}/dashboard` } })),
-        ...teams.flatMap(t => t.members.map(m => ({ email: m.email, variables: { name: m.name, eventName: event.title, dashboardUrl: `${FRONTEND_URL}/${event.slug}/dashboard` } })))
+        ...soloRegs.map(r => ({ email: r.user.email, variables: { name: r.user.name, eventName: event.title, dashboardUrl: `${FRONTEND_URL}/events/${event.slug}/dashboard` } })),
+        ...teams.flatMap(t => t.members.map(m => ({ email: m.email, variables: { name: m.name, eventName: event.title, dashboardUrl: `${FRONTEND_URL}/events/${event.slug}/dashboard` } })))
       ]
 
       if (recipients.length > 0) {
@@ -243,8 +243,13 @@ export const publishResults = async (req, res) => {
           eventId: event.id
         })
       }
-    } catch {
-      console.error("Results email failed")
+    } catch (emailErr) {
+      console.error("Results email failed:", {
+        message: emailErr?.message || "Unknown error",
+        eventId: event.id,
+        slug: event.slug,
+        timestamp: new Date().toISOString()
+      })
     }
 
     return sendSuccess(res, { message: "Results published" })

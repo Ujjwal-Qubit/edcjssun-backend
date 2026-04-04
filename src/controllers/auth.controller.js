@@ -14,6 +14,7 @@ import { sendError, sendSuccess } from "../utils/response.js"
 import { isValidEmail, isNonEmptyString } from "../utils/validators.js"
 
 const BCRYPT_ROUNDS = 12
+const ADMIN_ROLES = new Set(["EVENT_ADMIN", "SUPER_ADMIN"])
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production"
 
@@ -48,7 +49,35 @@ export const signup = async (req, res) => {
 
     const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } })
     if (existing) {
-      return sendError(res, 409, "EMAIL_EXISTS", "Email already registered")
+      if (existing.isVerified) {
+        return sendError(res, 409, "EMAIL_EXISTS", "Email already registered. Please login instead.")
+      }
+
+      const otp = generateOTP()
+      await prisma.otp.deleteMany({ where: { email: normalizedEmail } })
+      await prisma.otp.create({
+        data: {
+          email: normalizedEmail,
+          otp,
+          expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+        }
+      })
+
+      try {
+        await sendOtpEmail(normalizedEmail, otp)
+      } catch (emailErr) {
+        console.error("Failed to resend verification OTP for existing unverified user:", emailErr)
+        return sendError(
+          res,
+          503,
+          "EMAIL_DELIVERY_FAILED",
+          "Account exists but OTP email delivery failed. Please try resend in a moment."
+        )
+      }
+
+      return sendSuccess(res, {
+        message: "Account already exists but is not verified. A fresh OTP has been sent."
+      })
     }
 
     const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS)
@@ -63,12 +92,159 @@ export const signup = async (req, res) => {
       }
     })
 
-    // TODO: Send verification email (verify endpoint undefined in PRD)
+    const otp = generateOTP()
+    await prisma.otp.deleteMany({ where: { email: normalizedEmail } })
+    await prisma.otp.create({
+      data: {
+        email: normalizedEmail,
+        otp,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+      }
+    })
+
+    try {
+      await sendOtpEmail(normalizedEmail, otp)
+    } catch (emailErr) {
+      console.error("Failed to send verification OTP email:", emailErr)
+
+      // Roll back signup state so user can retry without hitting EMAIL_EXISTS.
+      await prisma.$transaction([
+        prisma.otp.deleteMany({ where: { email: normalizedEmail } }),
+        prisma.user.deleteMany({ where: { email: normalizedEmail } })
+      ])
+
+      return sendError(
+        res,
+        503,
+        "EMAIL_DELIVERY_FAILED",
+        "Unable to deliver verification OTP right now. Please try resend in a moment."
+      )
+    }
 
     return sendSuccess(res, { message: "Account created. Please verify your email." }, 201)
   } catch (err) {
     console.error("Signup error:", err)
     return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Signup failed")
+  }
+}
+
+// ─── POST /api/auth/resend-verification ────────────────────────
+
+export const resendVerification = async (req, res) => {
+  try {
+    const { email } = req.body || {}
+
+    if (!isValidEmail(email)) {
+      return sendError(res, 400, "VALIDATION_ERROR", "Valid email is required", "email")
+    }
+
+    const normalizedEmail = email.trim().toLowerCase()
+    const user = await prisma.user.findUnique({ where: { email: normalizedEmail } })
+
+    // Do not reveal account existence.
+    if (!user || user.isVerified) {
+      return sendSuccess(res, { message: "If your account is pending verification, a new code has been sent." })
+    }
+
+    const otp = generateOTP()
+    await prisma.otp.deleteMany({ where: { email: normalizedEmail } })
+    await prisma.otp.create({
+      data: {
+        email: normalizedEmail,
+        otp,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+      }
+    })
+
+    try {
+      await sendOtpEmail(normalizedEmail, otp)
+    } catch (emailErr) {
+      console.error("Failed to resend verification OTP email:", emailErr)
+      return sendError(
+        res,
+        503,
+        "EMAIL_DELIVERY_FAILED",
+        "Unable to deliver verification OTP right now. Please check sender settings and try again."
+      )
+    }
+
+    return sendSuccess(res, { message: "Verification code sent. Please check your inbox." })
+  } catch (err) {
+    console.error("Resend verification error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to resend verification code")
+  }
+}
+
+// ─── POST /api/auth/verify-email ───────────────────────────────
+
+export const verifyEmail = async (req, res) => {
+  try {
+    const { email, otp } = req.body || {}
+
+    if (!isValidEmail(email) || !isNonEmptyString(otp)) {
+      return sendError(res, 400, "VALIDATION_ERROR", "Email and OTP are required")
+    }
+
+    const normalizedEmail = email.trim().toLowerCase()
+    const user = await prisma.user.findUnique({ where: { email: normalizedEmail } })
+
+    if (!user) {
+      return sendError(res, 400, "INVALID_OTP", "Invalid OTP")
+    }
+
+    if (user.isVerified) {
+      return sendSuccess(res, { message: "Email already verified." })
+    }
+
+    const record = await prisma.otp.findFirst({
+      where: { email: normalizedEmail, otp: String(otp).trim() },
+      orderBy: { createdAt: "desc" }
+    })
+
+    if (!record || record.expiresAt < new Date()) {
+      return sendError(res, 400, "INVALID_OTP", "Invalid or expired OTP")
+    }
+
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: user.id },
+        data: { isVerified: true }
+      }),
+      prisma.otp.deleteMany({ where: { email: normalizedEmail } })
+    ])
+
+    const dbToken = await prisma.refreshToken.create({
+      data: {
+        userId: user.id,
+        token: crypto.randomBytes(32).toString("hex"),
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+      }
+    })
+
+    const accessToken = signAccessToken({ userId: user.id, role: user.role })
+    const refreshToken = signRefreshToken({ userId: user.id, tokenId: dbToken.id })
+
+    await prisma.refreshToken.update({
+      where: { id: dbToken.id },
+      data: { token: refreshToken }
+    })
+
+    res.cookie("refreshToken", refreshToken, COOKIE_OPTIONS)
+
+    return sendSuccess(res, {
+      accessToken,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        avatar: user.avatar,
+        isVerified: true
+      }
+    })
+  } catch (err) {
+    console.error("Verify email error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Email verification failed")
   }
 }
 
@@ -94,8 +270,9 @@ export const login = async (req, res) => {
       return sendError(res, 401, "INVALID_CREDENTIALS", "Invalid credentials")
     }
 
-    // PRD: isVerified check
-    if (!user.isVerified) {
+    // Allow admin accounts to authenticate directly from DB even if email verification is pending.
+    const isAdminAccount = ADMIN_ROLES.has(user.role)
+    if (!user.isVerified && !isAdminAccount) {
       return sendError(res, 403, "NOT_VERIFIED", "Email not verified")
     }
 

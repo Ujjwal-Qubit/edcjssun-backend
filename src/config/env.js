@@ -3,7 +3,6 @@ const REQUIRED_ENV_VARS = [
   "JWT_ACCESS_SECRET",
   "JWT_REFRESH_SECRET",
   "FRONTEND_URL",
-  "AUCTION_PASSWORD",
   "RESEND_API_KEY",
   "EMAIL_FROM",
   "CLOUDINARY_CLOUD_NAME",
@@ -12,7 +11,13 @@ const REQUIRED_ENV_VARS = [
 ]
 
 export function validateEnvironment() {
-  const missing = REQUIRED_ENV_VARS.filter((key) => {
+  const required = [...REQUIRED_ENV_VARS]
+
+  if (process.env.ENABLE_AUCTION === "true") {
+    required.push("AUCTION_PASSWORD")
+  }
+
+  const missing = required.filter((key) => {
     const value = process.env[key]
     return typeof value !== "string" || value.trim().length === 0
   })

@@ -101,6 +101,16 @@ export const requireShortlisted = async (req, res, next) => {
       return sendError(res, 404, "EVENT_NOT_FOUND", "Event not found")
     }
 
+    const roundId = req.params.roundId
+    let allowRegisteredForRoundOne = false
+    if (roundId) {
+      const round = await prisma.round.findFirst({
+        where: { id: roundId, eventId: event.id },
+        select: { order: true }
+      })
+      allowRegisteredForRoundOne = Number(round?.order) === 1
+    }
+
     // Check solo registration first
     const soloReg = await prisma.registration.findUnique({
       where: { userId_eventId: { userId, eventId: event.id } }
@@ -109,6 +119,12 @@ export const requireShortlisted = async (req, res, next) => {
     if (soloReg) {
       // OPEN_ACCESS → always eligible
       if (event.registrationMode === "OPEN_ACCESS") {
+        req.registration = soloReg
+        req.registrationType = "solo"
+        req.event = event
+        return next()
+      }
+      if (allowRegisteredForRoundOne) {
         req.registration = soloReg
         req.registrationType = "solo"
         req.event = event
@@ -134,6 +150,12 @@ export const requireShortlisted = async (req, res, next) => {
 
     if (teamMember?.team) {
       if (event.registrationMode === "OPEN_ACCESS") {
+        req.team = teamMember.team
+        req.registrationType = "team"
+        req.event = event
+        return next()
+      }
+      if (allowRegisteredForRoundOne) {
         req.team = teamMember.team
         req.registrationType = "team"
         req.event = event

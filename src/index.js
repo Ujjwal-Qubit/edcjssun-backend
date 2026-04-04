@@ -1,4 +1,4 @@
-import "dotenv/config"
+import "./config/loadEnv.js"
 import express from "express"
 import cookieParser from "cookie-parser"
 import cors from "cors"
@@ -18,6 +18,7 @@ import prisma from "./utils/prisma.js"
 
 const app = express()
 const PORT = process.env.PORT || 3001
+const ENABLE_AUCTION = process.env.ENABLE_AUCTION === "true"
 
 validateEnvironment()
 
@@ -45,7 +46,7 @@ app.use(cors({
 }))
 
 // ─── Middleware ──────────────────────────────────────────────────
-app.use(express.json({ limit: "10mb" }))
+app.use(express.json({ limit: "20mb" }))
 app.use(cookieParser())
 
 // Structured JSON logging per PRD
@@ -59,10 +60,10 @@ app.use(morgan((tokens, req, res) => {
   })
 }))
 
-// Global rate limiter — 200 req/min per IP
+// Global rate limiter — 1000 req/min per IP
 app.use(rateLimit({
   windowMs: 60 * 1000,
-  max: 200,
+  max: 1000,
   message: {
     success: false,
     error: { code: "RATE_LIMITED", message: "Too many requests from this IP" }
@@ -103,7 +104,11 @@ app.use("/api/events", eventsRoutes)
 app.use("/api/participant", participantRoutes)
 app.use("/api/admin", adminRoutes)
 app.use("/api/judging", judgingRoutes)
-app.use("/api/auction", auctionRoutes)
+if (ENABLE_AUCTION) {
+  app.use("/api/auction", auctionRoutes)
+} else {
+  console.log("Auction module disabled (ENABLE_AUCTION=false)")
+}
 
 // ─── 404 ────────────────────────────────────────────────────────
 app.use((req, res) => {

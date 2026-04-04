@@ -1,24 +1,49 @@
 import { Resend } from "resend"
 import prisma from "../utils/prisma.js"
 
-const resend = new Resend(process.env.RESEND_API_KEY)
 const DEFAULT_FROM = process.env.EMAIL_FROM || "EDC JSSUN <onboarding@resend.dev>"
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173"
+
+let resendClient = null
+
+function getResendClient() {
+  const apiKey = process.env.RESEND_API_KEY
+  if (!apiKey) return null
+
+  if (!resendClient) {
+    resendClient = new Resend(apiKey)
+  }
+
+  return resendClient
+}
 
 // ─── Core send function ─────────────────────────────────────────
 
 async function sendEmail({ to, subject, html }) {
-  if (!process.env.RESEND_API_KEY) {
-    console.warn("RESEND_API_KEY missing. Skipping email send.")
-    return { skipped: true }
+  const client = getResendClient()
+  if (!client) {
+    throw new Error("RESEND_API_KEY missing")
   }
 
-  const result = await resend.emails.send({
+  if (!DEFAULT_FROM || DEFAULT_FROM.toLowerCase().includes("test@example.com")) {
+    throw new Error("EMAIL_FROM is not configured with a valid verified sender")
+  }
+
+  const result = await client.emails.send({
     from: DEFAULT_FROM,
     to,
     subject,
     html
   })
+
+  if (result?.error) {
+    const resendMessage = result.error?.message || "Unknown Resend send error"
+    throw new Error(`Resend email delivery failed: ${resendMessage}`)
+  }
+
+  if (!result?.data?.id && !result?.id) {
+    throw new Error("Resend email delivery failed: missing message id")
+  }
 
   return { skipped: false, data: result }
 }
@@ -354,7 +379,7 @@ export function buildEmailVariables({ user, event, registrationId, teamName, qrC
     eventName: event?.title || "",
     eventDate: formatDate(event?.eventDate),
     venue: event?.venue || "",
-    dashboardUrl: `${FRONTEND_URL}/${event?.slug}/dashboard`,
+    dashboardUrl: `${FRONTEND_URL}/events/${event?.slug}/dashboard`,
     setupPasswordUrl: "",
     qrCodeUrl: qrCode || "",
     statusMessage: "",
@@ -389,7 +414,7 @@ export async function sendRegistrationConfirmationEmail({ email, teamName, regis
       eventName,
       eventDate: "",
       venue: "",
-      dashboardUrl: `${FRONTEND_URL}/dashboard`
+      dashboardUrl: `${FRONTEND_URL}/events`
     }
   })
 }

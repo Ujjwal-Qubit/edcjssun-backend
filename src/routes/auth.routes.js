@@ -2,7 +2,8 @@ import express from "express"
 import rateLimit from "express-rate-limit"
 import {
   signup, login, logout, refresh, me,
-  forgotPassword, verifyOtp, resetPassword, setupPassword
+  forgotPassword, verifyOtp, resetPassword, setupPassword,
+  resendVerification, verifyEmail
 } from "../controllers/auth.controller.js"
 import { requireAuth } from "../middleware/auth.middleware.js"
 
@@ -25,6 +26,8 @@ router.post("/login", authLimiter, login)
 router.post("/logout", logout)
 router.post("/refresh", refresh)
 router.get("/me", requireAuth, me)
+router.post("/resend-verification", otpLimiter, resendVerification)
+router.post("/verify-email", otpLimiter, verifyEmail)
 router.post("/forgot-password", otpLimiter, forgotPassword)
 router.post("/verify-otp", authLimiter, verifyOtp)
 router.post("/reset-password", authLimiter, resetPassword)
