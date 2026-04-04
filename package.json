@@ -4,9 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "npm run db:push && node index.js",
+    "db:push": "prisma db push",
     "postinstall": "prisma generate",
-    "start:src": "node src/index.js",
+    "start:src": "npm run db:push && node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

@@ -45,14 +45,46 @@ export const getEventBySlug = async (req, res) => {
   try {
     const { slug } = req.params
 
-    const event = await prisma.event.findUnique({
-      where: { slug },
-      include: {
-        rounds: { orderBy: { order: 'asc' } },
-        prizes: true,
-        settings: true
+    let event
+
+    try {
+      event = await prisma.event.findUnique({
+        where: { slug },
+        include: {
+          rounds: { orderBy: { order: 'asc' } },
+          prizes: true,
+          settings: true
+        }
+      })
+    } catch (dbErr) {
+      // Temporary compatibility path for production databases that are behind schema.
+      if (dbErr?.code === 'P2022' && String(dbErr?.meta?.column || '').includes('EventSettings')) {
+        event = await prisma.event.findUnique({
+          where: { slug },
+          include: {
+            rounds: { orderBy: { order: 'asc' } },
+            prizes: true
+          }
+        })
+      } else {
+        throw dbErr
       }
-    })
+      })
+    } catch (queryErr) {
+      // Backward-compatible fallback for deployments where EventSettings columns
+      // are not fully migrated yet (Prisma P2022).
+      if (queryErr?.code === 'P2022' && String(queryErr?.meta?.column || '').startsWith('EventSettings.')) {
+        event = await prisma.event.findUnique({
+          where: { slug },
+          include: {
+            rounds: { orderBy: { order: 'asc' } },
+            prizes: true
+          }
+        })
+      } else {
+        throw queryErr
+      }
+    }
 
     if (!event) {
       return sendError(res, 404, 'EVENT_NOT_FOUND', 'Event not found')
