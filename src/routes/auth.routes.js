@@ -3,7 +3,9 @@ import rateLimit from "express-rate-limit"
 import {
   signup, login, logout, refresh, me,
   forgotPassword, verifyOtp, resetPassword, setupPassword,
-  resendVerification, verifyEmail
+  resendVerification, verifyEmail,
+  requestAdminEmailChangeOtp, verifyAdminEmailChange,
+  requestAdminPasswordChangeOtp, confirmAdminPasswordChange
 } from "../controllers/auth.controller.js"
 import { requireAuth } from "../middleware/auth.middleware.js"
 
@@ -32,5 +34,9 @@ router.post("/forgot-password", otpLimiter, forgotPassword)
 router.post("/verify-otp", authLimiter, verifyOtp)
 router.post("/reset-password", authLimiter, resetPassword)
 router.post("/setup-password", setupPassword)
+router.post("/admin/change-email/request-otp", otpLimiter, requireAuth, requestAdminEmailChangeOtp)
+router.post("/admin/change-email/verify", authLimiter, requireAuth, verifyAdminEmailChange)
+router.post("/admin/change-password/request-otp", otpLimiter, requireAuth, requestAdminPasswordChangeOtp)
+router.post("/admin/change-password/confirm", authLimiter, requireAuth, confirmAdminPasswordChange)
 
 export default router

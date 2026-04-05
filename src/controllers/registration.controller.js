@@ -8,6 +8,7 @@ import {
 } from "../services/email.service.js"
 import { generateRegistrationId } from "../utils/generateRegistrationId.js"
 import { generateQrToken } from "../services/qr.service.js"
+import { EVENT_SETTINGS_SAFE_SELECT } from "../utils/eventSettingsSelect.js"
 
 // ─── POST /api/events/:slug/register ────────────────────────────
 
@@ -209,13 +210,31 @@ async function handleTeamRegistration(req, res, slug) {
 
     // Check rollNo uniqueness within payload
     const rollNoSet = new Set()
+    const emailSet = new Set()
+    const phoneSet = new Set()
     members.forEach((member, index) => {
       const roll = typeof member?.rollNo === "string" ? member.rollNo.trim() : ""
+      const email = typeof member?.email === "string" ? member.email.trim().toLowerCase() : ""
+      const phone = typeof member?.phone === "string" ? member.phone.trim() : ""
       if (roll) {
         if (rollNoSet.has(roll)) {
           details[`members[${index}].rollNo`] = "Duplicate roll numbers in payload"
         }
         rollNoSet.add(roll)
+      }
+
+      if (email) {
+        if (emailSet.has(email)) {
+          details[`members[${index}].email`] = "Duplicate emails in payload"
+        }
+        emailSet.add(email)
+      }
+
+      if (phone) {
+        if (phoneSet.has(phone)) {
+          details[`members[${index}].phone`] = "Duplicate mobile numbers in payload"
+        }
+        phoneSet.add(phone)
       }
     })
   }
@@ -368,7 +387,7 @@ async function handleTeamRegistration(req, res, slug) {
 async function loadAndValidateEvent(slug) {
   const event = await prisma.event.findUnique({
     where: { slug },
-    include: { settings: true }
+    include: { settings: { select: EVENT_SETTINGS_SAFE_SELECT } }
   })
 
   if (!event || !event.isPublic) {

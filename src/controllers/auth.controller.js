@@ -17,14 +17,108 @@ const BCRYPT_ROUNDS = 12
 const ADMIN_ROLES = new Set(["EVENT_ADMIN", "SUPER_ADMIN"])
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production"
+const REFRESH_TOKEN_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || "7d"
+const SESSION_MAX_AGE = process.env.SESSION_MAX_AGE || "12h"
 
-const COOKIE_OPTIONS = {
+const DURATION_MULTIPLIER_MS = {
+  s: 1000,
+  m: 60 * 1000,
+  h: 60 * 60 * 1000,
+  d: 24 * 60 * 60 * 1000
+}
+
+const parseDurationToMs = (value, fallbackMs) => {
+  if (typeof value !== "string") return fallbackMs
+  const trimmed = value.trim().toLowerCase()
+  const match = trimmed.match(/^(\d+)([smhd])$/)
+  if (!match) return fallbackMs
+
+  const amount = Number(match[1])
+  const unit = match[2]
+  const multiplier = DURATION_MULTIPLIER_MS[unit]
+
+  if (!amount || !multiplier) return fallbackMs
+  return amount * multiplier
+}
+
+const DEFAULT_REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000
+
+const REFRESH_TOKEN_TTL_MS = parseDurationToMs(REFRESH_TOKEN_EXPIRES_IN, DEFAULT_REFRESH_TOKEN_TTL_MS)
+const SESSION_TTL_MS = parseDurationToMs(SESSION_MAX_AGE, DEFAULT_SESSION_TTL_MS)
+
+const COOKIE_BASE_OPTIONS = {
   httpOnly: true,
   secure: IS_PRODUCTION,
   sameSite: IS_PRODUCTION ? "None" : "Lax",
   domain: process.env.COOKIE_DOMAIN || undefined,
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
   path: "/"
+}
+
+const getCookieOptions = (maxAgeMs) => ({
+  ...COOKIE_BASE_OPTIONS,
+  maxAge: Math.max(1000, Number(maxAgeMs) || REFRESH_TOKEN_TTL_MS)
+})
+
+const clearRefreshCookie = (res) => {
+  res.clearCookie("refreshToken", COOKIE_BASE_OPTIONS)
+}
+
+const createSessionTokens = async ({ userId, role, existingTokenId, sessionExp }) => {
+  const nowMs = Date.now()
+  const computedSessionExp = typeof sessionExp === "number"
+    ? sessionExp
+    : Math.floor((nowMs + SESSION_TTL_MS) / 1000)
+  const sessionExpiryMs = computedSessionExp * 1000
+  const refreshExpiryMs = Math.min(nowMs + REFRESH_TOKEN_TTL_MS, sessionExpiryMs)
+
+  if (refreshExpiryMs <= nowMs) {
+    throw new Error("SESSION_EXPIRED")
+  }
+
+  let tokenRecordId = existingTokenId
+
+  if (!tokenRecordId) {
+    const record = await prisma.refreshToken.create({
+      data: {
+        userId,
+        token: crypto.randomBytes(32).toString("hex"),
+        expiresAt: new Date(refreshExpiryMs)
+      }
+    })
+
+    tokenRecordId = record.id
+  }
+
+  const accessToken = signAccessToken({ userId, role })
+  const refreshToken = signRefreshToken({
+    userId,
+    tokenId: tokenRecordId,
+    sessionExp: computedSessionExp
+  })
+
+  await prisma.refreshToken.update({
+    where: { id: tokenRecordId },
+    data: {
+      token: refreshToken,
+      expiresAt: new Date(refreshExpiryMs)
+    }
+  })
+
+  return {
+    accessToken,
+    refreshToken,
+    refreshTokenMaxAgeMs: refreshExpiryMs - nowMs,
+    sessionExpiresAt: new Date(sessionExpiryMs).toISOString()
+  }
+}
+
+const ensureAdminActor = (req, res) => {
+  if (!req?.user?.id || !ADMIN_ROLES.has(req.user.role)) {
+    sendError(res, 403, "INSUFFICIENT_ROLE", "Admin access required")
+    return false
+  }
+  return true
 }
 
 // ─── POST /api/auth/signup ──────────────────────────────────────
@@ -213,26 +307,16 @@ export const verifyEmail = async (req, res) => {
       prisma.otp.deleteMany({ where: { email: normalizedEmail } })
     ])
 
-    const dbToken = await prisma.refreshToken.create({
-      data: {
-        userId: user.id,
-        token: crypto.randomBytes(32).toString("hex"),
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-      }
+    const { accessToken, refreshToken, refreshTokenMaxAgeMs, sessionExpiresAt } = await createSessionTokens({
+      userId: user.id,
+      role: user.role
     })
 
-    const accessToken = signAccessToken({ userId: user.id, role: user.role })
-    const refreshToken = signRefreshToken({ userId: user.id, tokenId: dbToken.id })
-
-    await prisma.refreshToken.update({
-      where: { id: dbToken.id },
-      data: { token: refreshToken }
-    })
-
-    res.cookie("refreshToken", refreshToken, COOKIE_OPTIONS)
+    res.cookie("refreshToken", refreshToken, getCookieOptions(refreshTokenMaxAgeMs))
 
     return sendSuccess(res, {
       accessToken,
+      sessionExpiresAt,
       user: {
         id: user.id,
         name: user.name,
@@ -276,28 +360,16 @@ export const login = async (req, res) => {
       return sendError(res, 403, "NOT_VERIFIED", "Email not verified")
     }
 
-    // Create refresh token in DB
-    const dbToken = await prisma.refreshToken.create({
-      data: {
-        userId: user.id,
-        token: crypto.randomBytes(32).toString("hex"),
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-      }
+    const { accessToken, refreshToken, refreshTokenMaxAgeMs, sessionExpiresAt } = await createSessionTokens({
+      userId: user.id,
+      role: user.role
     })
 
-    const accessToken = signAccessToken({ userId: user.id, role: user.role })
-    const refreshToken = signRefreshToken({ userId: user.id, tokenId: dbToken.id })
-
-    // Update DB token with signed JWT
-    await prisma.refreshToken.update({
-      where: { id: dbToken.id },
-      data: { token: refreshToken }
-    })
-
-    res.cookie("refreshToken", refreshToken, COOKIE_OPTIONS)
+    res.cookie("refreshToken", refreshToken, getCookieOptions(refreshTokenMaxAgeMs))
 
     return sendSuccess(res, {
       accessToken,
+      sessionExpiresAt,
       user: {
         id: user.id,
         name: user.name,
@@ -323,7 +395,7 @@ export const logout = async (req, res) => {
       await prisma.refreshToken.deleteMany({ where: { token } })
     }
 
-    res.clearCookie("refreshToken", COOKIE_OPTIONS)
+    clearRefreshCookie(res)
 
     return sendSuccess(res, { message: "Logged out" })
   } catch (err) {
@@ -349,22 +421,62 @@ export const refresh = async (req, res) => {
       return sendError(res, 401, "INVALID_REFRESH", "Invalid refresh token")
     }
 
-    const existing = await prisma.refreshToken.findUnique({ where: { token } })
-    if (!existing || existing.expiresAt < new Date()) {
-      return sendError(res, 401, "INVALID_REFRESH", "Refresh token expired or not found")
+    if (!decoded?.tokenId || !decoded?.userId) {
+      clearRefreshCookie(res)
+      return sendError(res, 401, "INVALID_REFRESH", "Malformed refresh token")
+    }
+
+    if (typeof decoded.sessionExp === "number" && Date.now() >= decoded.sessionExp * 1000) {
+      await prisma.refreshToken.deleteMany({ where: { id: decoded.tokenId } })
+      clearRefreshCookie(res)
+      return sendError(res, 401, "SESSION_EXPIRED", "Session expired. Please log in again")
+    }
+
+    const existing = await prisma.refreshToken.findUnique({ where: { id: decoded.tokenId } })
+
+    if (!existing || existing.token !== token) {
+      clearRefreshCookie(res)
+      return sendError(res, 401, "INVALID_REFRESH", "Refresh token rotated or not found")
+    }
+
+    if (existing.expiresAt < new Date()) {
+      await prisma.refreshToken.deleteMany({ where: { id: existing.id } })
+      clearRefreshCookie(res)
+      return sendError(res, 401, "INVALID_REFRESH", "Refresh token expired")
     }
 
     // Fetch current user for up-to-date role
     const user = await prisma.user.findUnique({ where: { id: decoded.userId } })
     if (!user) {
+      await prisma.refreshToken.deleteMany({ where: { id: decoded.tokenId } })
+      clearRefreshCookie(res)
       return sendError(res, 401, "INVALID_REFRESH", "User not found")
     }
 
-    const newAccessToken = signAccessToken({ userId: user.id, role: user.role })
+    const {
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+      refreshTokenMaxAgeMs,
+      sessionExpiresAt
+    } = await createSessionTokens({
+      userId: user.id,
+      role: user.role,
+      existingTokenId: existing.id,
+      sessionExp: decoded.sessionExp
+    })
 
-    return sendSuccess(res, { accessToken: newAccessToken })
+    res.cookie("refreshToken", newRefreshToken, getCookieOptions(refreshTokenMaxAgeMs))
+
+    return sendSuccess(res, {
+      accessToken: newAccessToken,
+      sessionExpiresAt
+    })
   } catch (err) {
     console.error("Refresh token error:", err)
+    if (err?.message === "SESSION_EXPIRED") {
+      clearRefreshCookie(res)
+      return sendError(res, 401, "SESSION_EXPIRED", "Session expired. Please log in again")
+    }
     return sendError(res, 401, "INVALID_REFRESH", "Invalid refresh token")
   }
 }
@@ -531,26 +643,16 @@ export const setupPassword = async (req, res) => {
     })
 
     // PRD: Auto-login — return accessToken + set refreshToken cookie
-    const dbToken = await prisma.refreshToken.create({
-      data: {
-        userId: user.id,
-        token: crypto.randomBytes(32).toString("hex"),
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-      }
+    const { accessToken, refreshToken, refreshTokenMaxAgeMs, sessionExpiresAt } = await createSessionTokens({
+      userId: user.id,
+      role: user.role
     })
 
-    const accessToken = signAccessToken({ userId: user.id, role: user.role })
-    const refreshToken = signRefreshToken({ userId: user.id, tokenId: dbToken.id })
-
-    await prisma.refreshToken.update({
-      where: { id: dbToken.id },
-      data: { token: refreshToken }
-    })
-
-    res.cookie("refreshToken", refreshToken, COOKIE_OPTIONS)
+    res.cookie("refreshToken", refreshToken, getCookieOptions(refreshTokenMaxAgeMs))
 
     return sendSuccess(res, {
       accessToken,
+      sessionExpiresAt,
       user: {
         id: user.id,
         name: user.name,
@@ -563,6 +665,176 @@ export const setupPassword = async (req, res) => {
   } catch (err) {
     console.error("Setup password error:", err)
     return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to setup password")
+  }
+}
+
+// ─── POST /api/auth/admin/change-email/request-otp ─────────────
+
+export const requestAdminEmailChangeOtp = async (req, res) => {
+  try {
+    if (!ensureAdminActor(req, res)) return
+
+    const { newEmail } = req.body || {}
+    if (!isValidEmail(newEmail)) {
+      return sendError(res, 422, "VALIDATION_ERROR", "Valid new email is required", "newEmail")
+    }
+
+    const normalizedEmail = newEmail.trim().toLowerCase()
+    if (normalizedEmail === req.user.email?.trim().toLowerCase()) {
+      return sendError(res, 422, "VALIDATION_ERROR", "New email must be different from current email", "newEmail")
+    }
+
+    const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } })
+    if (existing) {
+      return sendError(res, 409, "EMAIL_EXISTS", "Email already in use", "newEmail")
+    }
+
+    const otp = generateOTP()
+    await prisma.otp.deleteMany({ where: { email: normalizedEmail } })
+    await prisma.otp.create({
+      data: {
+        email: normalizedEmail,
+        otp,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+      }
+    })
+
+    await sendOtpEmail(normalizedEmail, otp)
+
+    return sendSuccess(res, { message: "OTP sent to the new admin email." })
+  } catch (err) {
+    console.error("requestAdminEmailChangeOtp error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to send OTP")
+  }
+}
+
+// ─── POST /api/auth/admin/change-email/verify ──────────────────
+
+export const verifyAdminEmailChange = async (req, res) => {
+  try {
+    if (!ensureAdminActor(req, res)) return
+
+    const { newEmail, otp } = req.body || {}
+    if (!isValidEmail(newEmail) || !isNonEmptyString(otp)) {
+      return sendError(res, 422, "VALIDATION_ERROR", "New email and OTP are required")
+    }
+
+    const normalizedEmail = newEmail.trim().toLowerCase()
+    const currentEmail = req.user.email?.trim().toLowerCase()
+    if (normalizedEmail === currentEmail) {
+      return sendError(res, 422, "VALIDATION_ERROR", "New email must be different from current email", "newEmail")
+    }
+
+    const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } })
+    if (existing) {
+      return sendError(res, 409, "EMAIL_EXISTS", "Email already in use", "newEmail")
+    }
+
+    const record = await prisma.otp.findFirst({
+      where: { email: normalizedEmail, otp: String(otp).trim() },
+      orderBy: { createdAt: "desc" }
+    })
+
+    if (!record || record.expiresAt < new Date()) {
+      return sendError(res, 400, "INVALID_OTP", "Invalid or expired OTP")
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({
+        where: { id: req.user.id },
+        data: { email: normalizedEmail, isVerified: true },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          avatar: true,
+          isVerified: true
+        }
+      })
+
+      await tx.otp.deleteMany({ where: { email: normalizedEmail } })
+      return user
+    })
+
+    return sendSuccess(res, { message: "Admin email updated successfully", user: updated })
+  } catch (err) {
+    console.error("verifyAdminEmailChange error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to update email")
+  }
+}
+
+// ─── POST /api/auth/admin/change-password/request-otp ──────────
+
+export const requestAdminPasswordChangeOtp = async (req, res) => {
+  try {
+    if (!ensureAdminActor(req, res)) return
+
+    const normalizedEmail = req.user.email?.trim().toLowerCase()
+    if (!isValidEmail(normalizedEmail)) {
+      return sendError(res, 422, "VALIDATION_ERROR", "Admin email is invalid")
+    }
+
+    const otp = generateOTP()
+    await prisma.otp.deleteMany({ where: { email: normalizedEmail } })
+    await prisma.otp.create({
+      data: {
+        email: normalizedEmail,
+        otp,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+      }
+    })
+
+    await sendOtpEmail(normalizedEmail, otp)
+
+    return sendSuccess(res, { message: "OTP sent to current admin email." })
+  } catch (err) {
+    console.error("requestAdminPasswordChangeOtp error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to send OTP")
+  }
+}
+
+// ─── POST /api/auth/admin/change-password/confirm ──────────────
+
+export const confirmAdminPasswordChange = async (req, res) => {
+  try {
+    if (!ensureAdminActor(req, res)) return
+
+    const { otp, newPassword } = req.body || {}
+    if (!isNonEmptyString(otp) || !isNonEmptyString(newPassword)) {
+      return sendError(res, 422, "VALIDATION_ERROR", "OTP and new password are required")
+    }
+
+    if (newPassword.length < 8) {
+      return sendError(res, 422, "VALIDATION_ERROR", "Password must be at least 8 characters", "newPassword")
+    }
+
+    const normalizedEmail = req.user.email?.trim().toLowerCase()
+    const record = await prisma.otp.findFirst({
+      where: { email: normalizedEmail, otp: String(otp).trim() },
+      orderBy: { createdAt: "desc" }
+    })
+
+    if (!record || record.expiresAt < new Date()) {
+      return sendError(res, 400, "INVALID_OTP", "Invalid or expired OTP")
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS)
+
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: req.user.id },
+        data: { password: hashedPassword }
+      }),
+      prisma.otp.deleteMany({ where: { email: normalizedEmail } }),
+      prisma.refreshToken.deleteMany({ where: { userId: req.user.id } })
+    ])
+
+    clearRefreshCookie(res)
+    return sendSuccess(res, { message: "Password updated successfully. Please log in again." })
+  } catch (err) {
+    console.error("confirmAdminPasswordChange error:", err)
+    return sendError(res, 500, "INTERNAL_SERVER_ERROR", "Failed to update password")
   }
 }
 
