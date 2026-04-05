@@ -1,0 +1,23 @@
+export const EVENT_SETTINGS_SAFE_SELECT = {
+  id: true,
+  registrationOpen: true,
+  submissionsOpen: true,
+  leaderboardVisible: true,
+  resultsPublished: true,
+  checkInEnabled: true,
+  judgingOpen: true,
+  registrationDeadline: true,
+  resultAnnouncementDate: true,
+  checkInOpenTime: true,
+  notifyOnRegistration: true,
+  notifyOnStatusChange: true,
+  notifyOnSubmission: true,
+  reminderHoursBefore: true,
+  autoCloseRegistration: true,
+  autoOpenSubmissions: true,
+  maxTeamsPerProblem: true,
+  currentPhase: true,
+  allowWalkIns: true,
+  updatedAt: true,
+  updatedBy: true
+}

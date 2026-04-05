@@ -6,8 +6,10 @@
   "scripts": {
     "start": "node index.js",
     "postinstall": "prisma generate",
+    "verify:imports": "node scripts/verify-imports.mjs",
     "start:src": "node src/index.js",
     "dev": "nodemon src/index.js",
+    "prestart": "npm run verify:imports",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
